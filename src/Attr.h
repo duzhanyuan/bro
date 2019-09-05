@@ -15,19 +15,13 @@ typedef enum {
 	ATTR_OPTIONAL,
 	ATTR_DEFAULT,
 	ATTR_REDEF,
-	ATTR_ROTATE_INTERVAL,
-	ATTR_ROTATE_SIZE,
 	ATTR_ADD_FUNC,
 	ATTR_DEL_FUNC,
 	ATTR_EXPIRE_FUNC,
 	ATTR_EXPIRE_READ,
 	ATTR_EXPIRE_WRITE,
 	ATTR_EXPIRE_CREATE,
-	ATTR_PERSISTENT,
-	ATTR_SYNCHRONIZED,
-	ATTR_ENCRYPT,
 	ATTR_RAW_OUTPUT,
-	ATTR_MERGEABLE,
 	ATTR_PRIORITY,
 	ATTR_GROUP,
 	ATTR_LOG,
@@ -40,8 +34,8 @@ typedef enum {
 
 class Attr : public BroObj {
 public:
-	Attr(attr_tag t, Expr* e = 0);
-	~Attr();
+	explicit Attr(attr_tag t, Expr* e = 0);
+	~Attr() override;
 
 	attr_tag Tag() const	{ return tag; }
 	Expr* AttrExpr() const	{ return expr; }
@@ -56,8 +50,8 @@ public:
 	int RedundantAttrOkay() const
 		{ return tag == ATTR_REDEF || tag == ATTR_OPTIONAL; }
 
-	void Describe(ODesc* d) const;
-	void DescribeReST(ODesc* d) const;
+	void Describe(ODesc* d) const override;
+	void DescribeReST(ODesc* d, bool shorten = false) const;
 
 	bool operator==(const Attr& other) const
 		{
@@ -83,8 +77,8 @@ protected:
 // Manages a collection of attributes.
 class Attributes : public BroObj {
 public:
-	Attributes(attr_list* a, BroType* t, bool in_record);
-	~Attributes();
+	Attributes(attr_list* a, BroType* t, bool in_record, bool is_global);
+	~Attributes() override;
 
 	void AddAttr(Attr* a);
 	void AddAttrs(Attributes* a);	// Unref's 'a' when done
@@ -94,12 +88,9 @@ public:
 	void RemoveAttr(attr_tag t);
 
 	void Describe(ODesc* d) const override;
-	void DescribeReST(ODesc* d) const;
+	void DescribeReST(ODesc* d, bool shorten = false) const;
 
 	attr_list* Attrs()	{ return attrs; }
-
-	bool Serialize(SerialInfo* info) const;
-	static Attributes* Unserialize(UnserialInfo* info);
 
 	bool operator==(const Attributes& other) const;
 
@@ -107,11 +98,10 @@ protected:
 	Attributes() : type(), attrs(), in_record()	{ }
 	void CheckAttr(Attr* attr);
 
-	DECLARE_SERIAL(Attributes);
-
 	BroType* type;
 	attr_list* attrs;
 	bool in_record;
+	bool global_var;
 };
 
 #endif

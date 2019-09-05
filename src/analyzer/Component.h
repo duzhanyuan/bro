@@ -7,7 +7,7 @@
 #include "plugin/Component.h"
 #include "plugin/TaggedComponent.h"
 
-#include "../bro-config.h"
+#include "../zeek-config.h"
 #include "../util.h"
 
 class Connection;
@@ -61,7 +61,7 @@ public:
 	/**
 	 * Destructor.
 	 */
-	~Component();
+	~Component() override;
 
 	/**
 	 * Initialization function. This function has to be called before any

@@ -1,10 +1,13 @@
 
-include(BroSubdir)
+include(ZeekSubdir)
 
 include_directories(BEFORE
                     ${CMAKE_CURRENT_SOURCE_DIR}
                     ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+include_directories(BEFORE ${CAF_INCLUDE_DIR_CORE})
+include_directories(BEFORE ${CAF_INCLUDE_DIR_IO})
 
 add_subdirectory(writers)
 

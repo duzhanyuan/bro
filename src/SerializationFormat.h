@@ -19,14 +19,14 @@ public:
 	virtual ~SerializationFormat();
 
 	// Unserialization.
-	virtual void StartRead(char* data, uint32 len);
+	virtual void StartRead(const char* data, uint32_t len);
 	virtual void EndRead();
 
 	virtual bool Read(int* v, const char* tag) = 0;
-	virtual bool Read(uint16* v, const char* tag) = 0;
-	virtual bool Read(uint32* v, const char* tag) = 0;
-	virtual bool Read(int64* v, const char* tag) = 0;
-	virtual bool Read(uint64* v, const char* tag) = 0;
+	virtual bool Read(uint16_t* v, const char* tag) = 0;
+	virtual bool Read(uint32_t* v, const char* tag) = 0;
+	virtual bool Read(int64_t* v, const char* tag) = 0;
+	virtual bool Read(uint64_t* v, const char* tag) = 0;
 	virtual bool Read(char* v, const char* tag) = 0;
 	virtual bool Read(bool* v, const char* tag) = 0;
 	virtual bool Read(double* d, const char* tag) = 0;
@@ -52,13 +52,13 @@ public:
 	 *             be reclaimed using "free()".
 	 * @return The number of bytes in the buffer object assigned to \a data.
 	 */
-	virtual uint32 EndWrite(char** data);
+	virtual uint32_t EndWrite(char** data);
 
 	virtual bool Write(int v, const char* tag) = 0;
-	virtual bool Write(uint16 v, const char* tag) = 0;
-	virtual bool Write(uint32 v, const char* tag) = 0;
-	virtual bool Write(int64 v, const char* tag) = 0;
-	virtual bool Write(uint64 v, const char* tag) = 0;
+	virtual bool Write(uint16_t v, const char* tag) = 0;
+	virtual bool Write(uint32_t v, const char* tag) = 0;
+	virtual bool Write(int64_t v, const char* tag) = 0;
+	virtual bool Write(uint64_t v, const char* tag) = 0;
 	virtual bool Write(char v, const char* tag) = 0;
 	virtual bool Write(bool v, const char* tag) = 0;
 	virtual bool Write(double d, const char* tag) = 0;
@@ -81,15 +81,15 @@ protected:
 	bool ReadData(void* buf, size_t count);
 	bool WriteData(const void* buf, size_t count);
 
-	static const uint32 INITIAL_SIZE = 65536;
+	static const uint32_t INITIAL_SIZE = 65536;
 	static const float GROWTH_FACTOR;
 	char* output;
-	uint32 output_size;
-	uint32 output_pos;
+	uint32_t output_size;
+	uint32_t output_pos;
 
-	char* input;
-	uint32 input_len;
-	uint32 input_pos;
+	const char* input;
+	uint32_t input_len;
+	uint32_t input_pos;
 
 	int bytes_written;
 	int bytes_read;
@@ -98,40 +98,40 @@ protected:
 class BinarySerializationFormat : public SerializationFormat {
 public:
 	BinarySerializationFormat();
-	virtual ~BinarySerializationFormat();
+	~BinarySerializationFormat() override;
 
-	virtual bool Read(int* v, const char* tag);
-	virtual bool Read(uint16* v, const char* tag);
-	virtual bool Read(uint32* v, const char* tag);
-	virtual bool Read(int64* v, const char* tag);
-	virtual bool Read(uint64* v, const char* tag);
-	virtual bool Read(char* v, const char* tag);
-	virtual bool Read(bool* v, const char* tag);
-	virtual bool Read(double* d, const char* tag);
-	virtual bool Read(char** str, int* len, const char* tag);
-	virtual bool Read(string* s, const char* tag);
-	virtual bool Read(IPAddr* addr, const char* tag);
-	virtual bool Read(IPPrefix* prefix, const char* tag);
-	virtual bool Read(struct in_addr* addr, const char* tag);
-	virtual bool Read(struct in6_addr* addr, const char* tag);
-	virtual bool Write(int v, const char* tag);
-	virtual bool Write(uint16 v, const char* tag);
-	virtual bool Write(uint32 v, const char* tag);
-	virtual bool Write(int64 v, const char* tag);
-	virtual bool Write(uint64 v, const char* tag);
-	virtual bool Write(char v, const char* tag);
-	virtual bool Write(bool v, const char* tag);
-	virtual bool Write(double d, const char* tag);
-	virtual bool Write(const char* s, const char* tag);
-	virtual bool Write(const char* buf, int len, const char* tag);
-	virtual bool Write(const string& s, const char* tag);
-	virtual bool Write(const IPAddr& addr, const char* tag);
-	virtual bool Write(const IPPrefix& prefix, const char* tag);
-	virtual bool Write(const struct in_addr& addr, const char* tag);
-	virtual bool Write(const struct in6_addr& addr, const char* tag);
-	virtual bool WriteOpenTag(const char* tag);
-	virtual bool WriteCloseTag(const char* tag);
-	virtual bool WriteSeparator();
+	bool Read(int* v, const char* tag) override;
+	bool Read(uint16_t* v, const char* tag) override;
+	bool Read(uint32_t* v, const char* tag) override;
+	bool Read(int64_t* v, const char* tag) override;
+	bool Read(uint64_t* v, const char* tag) override;
+	bool Read(char* v, const char* tag) override;
+	bool Read(bool* v, const char* tag) override;
+	bool Read(double* d, const char* tag) override;
+	bool Read(char** str, int* len, const char* tag) override;
+	bool Read(string* s, const char* tag) override;
+	bool Read(IPAddr* addr, const char* tag) override;
+	bool Read(IPPrefix* prefix, const char* tag) override;
+	bool Read(struct in_addr* addr, const char* tag) override;
+	bool Read(struct in6_addr* addr, const char* tag) override;
+	bool Write(int v, const char* tag) override;
+	bool Write(uint16_t v, const char* tag) override;
+	bool Write(uint32_t v, const char* tag) override;
+	bool Write(int64_t v, const char* tag) override;
+	bool Write(uint64_t v, const char* tag) override;
+	bool Write(char v, const char* tag) override;
+	bool Write(bool v, const char* tag) override;
+	bool Write(double d, const char* tag) override;
+	bool Write(const char* s, const char* tag) override;
+	bool Write(const char* buf, int len, const char* tag) override;
+	bool Write(const string& s, const char* tag) override;
+	bool Write(const IPAddr& addr, const char* tag) override;
+	bool Write(const IPPrefix& prefix, const char* tag) override;
+	bool Write(const struct in_addr& addr, const char* tag) override;
+	bool Write(const struct in6_addr& addr, const char* tag) override;
+	bool WriteOpenTag(const char* tag) override;
+	bool WriteCloseTag(const char* tag) override;
+	bool WriteSeparator() override;
 };
 
 #endif

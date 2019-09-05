@@ -22,18 +22,22 @@ refine connection SOCKS_Conn += {
 
 	function socks4_request(request: SOCKS4_Request): bool
 		%{
-		RecordVal* sa = new RecordVal(socks_address);
-		sa->Assign(0, new AddrVal(htonl(${request.addr})));
-		if ( ${request.v4a} )
-			sa->Assign(1, array_to_string(${request.name}));
+		if ( socks_request )
+			{
+			RecordVal* sa = new RecordVal(socks_address);
+			sa->Assign(0, new AddrVal(htonl(${request.addr})));
 
-		BifEvent::generate_socks_request(bro_analyzer(),
-		                                 bro_analyzer()->Conn(),
-		                                 4,
-		                                 ${request.command},
-		                                 sa,
-		                                 new PortVal(${request.port} | TCP_PORT_MASK),
-		                                 array_to_string(${request.user}));
+			if ( ${request.v4a} )
+				sa->Assign(1, array_to_string(${request.name}));
+
+			BifEvent::generate_socks_request(bro_analyzer(),
+			                                 bro_analyzer()->Conn(),
+			                                 4,
+			                                 ${request.command},
+			                                 sa,
+			                                 val_mgr->GetPort(${request.port}, TRANSPORT_TCP),
+			                                 array_to_string(${request.user}));
+			}
 
 		static_cast<analyzer::socks::SOCKS_Analyzer*>(bro_analyzer())->EndpointDone(true);
 
@@ -42,15 +46,18 @@ refine connection SOCKS_Conn += {
 
 	function socks4_reply(reply: SOCKS4_Reply): bool
 		%{
-		RecordVal* sa = new RecordVal(socks_address);
-		sa->Assign(0, new AddrVal(htonl(${reply.addr})));
+		if ( socks_reply )
+			{
+			RecordVal* sa = new RecordVal(socks_address);
+			sa->Assign(0, new AddrVal(htonl(${reply.addr})));
 
-		BifEvent::generate_socks_reply(bro_analyzer(),
-		                               bro_analyzer()->Conn(),
-		                               4,
-		                               ${reply.status},
-		                               sa,
-		                               new PortVal(${reply.port} | TCP_PORT_MASK));
+			BifEvent::generate_socks_reply(bro_analyzer(),
+			                               bro_analyzer()->Conn(),
+			                               4,
+			                               ${reply.status},
+			                               sa,
+			                               val_mgr->GetPort(${reply.port}, TRANSPORT_TCP));
+			}
 
 		bro_analyzer()->ProtocolConfirmation();
 		static_cast<analyzer::socks::SOCKS_Analyzer*>(bro_analyzer())->EndpointDone(false);
@@ -97,13 +104,16 @@ refine connection SOCKS_Conn += {
 				return false;
 			}
 
-		BifEvent::generate_socks_request(bro_analyzer(),
-		                                 bro_analyzer()->Conn(),
-		                                 5,
-		                                 ${request.command},
-		                                 sa,
-		                                 new PortVal(${request.port} | TCP_PORT_MASK),
-		                                 new StringVal(""));
+		if ( socks_request )
+			BifEvent::generate_socks_request(bro_analyzer(),
+			                                 bro_analyzer()->Conn(),
+			                                 5,
+			                                 ${request.command},
+			                                 sa,
+			                                 val_mgr->GetPort(${request.port}, TRANSPORT_TCP),
+			                                 val_mgr->GetEmptyString());
+		else
+			Unref(sa);
 
 		static_cast<analyzer::socks::SOCKS_Analyzer*>(bro_analyzer())->EndpointDone(true);
 
@@ -136,12 +146,15 @@ refine connection SOCKS_Conn += {
 				return false;
 			}
 
-		BifEvent::generate_socks_reply(bro_analyzer(),
-		                               bro_analyzer()->Conn(),
-		                               5,
-		                               ${reply.reply},
-		                               sa,
-		                               new PortVal(${reply.port} | TCP_PORT_MASK));
+		if ( socks_reply )
+			BifEvent::generate_socks_reply(bro_analyzer(),
+			                               bro_analyzer()->Conn(),
+			                               5,
+			                               ${reply.reply},
+			                               sa,
+			                               val_mgr->GetPort(${reply.port}, TRANSPORT_TCP));
+		else
+			Unref(sa);
 
 		bro_analyzer()->ProtocolConfirmation();
 		static_cast<analyzer::socks::SOCKS_Analyzer*>(bro_analyzer())->EndpointDone(false);
@@ -150,6 +163,9 @@ refine connection SOCKS_Conn += {
 
 	function socks5_auth_request_userpass(request: SOCKS5_Auth_Request_UserPass_v1): bool
 		%{
+		if ( ! socks_login_userpass_request )
+			return true;
+
 		StringVal* user = new StringVal(${request.username}.length(), (const char*) ${request.username}.begin());
 		StringVal* pass = new StringVal(${request.password}.length(), (const char*) ${request.password}.begin());
 		
@@ -161,21 +177,22 @@ refine connection SOCKS_Conn += {
 
 	function socks5_unsupported_authentication_method(auth_method: uint8): bool
 		%{
-		reporter->Weird(bro_analyzer()->Conn(), fmt("socks5_unsupported_authentication_method_%d", auth_method));
+		reporter->Weird(bro_analyzer()->Conn(), "socks5_unsupported_authentication_method", fmt("%d", auth_method));
 		return true;
 		%}
 
 	function socks5_unsupported_authentication_version(auth_method: uint8, version: uint8): bool
 		%{
-		reporter->Weird(bro_analyzer()->Conn(), fmt("socks5_unsupported_authentication_%d_%d", auth_method, version));
+		reporter->Weird(bro_analyzer()->Conn(), "socks5_unsupported_authentication", fmt("method %d, version %d", auth_method, version));
 		return true;
 		%}
 	
 	function socks5_auth_reply_userpass(reply: SOCKS5_Auth_Reply_UserPass_v1): bool
 		%{
-		BifEvent::generate_socks_login_userpass_reply(bro_analyzer(),
-		                                              bro_analyzer()->Conn(),
-		                                              ${reply.code});
+		if ( socks_login_userpass_reply )
+			BifEvent::generate_socks_login_userpass_reply(bro_analyzer(),
+			                                              bro_analyzer()->Conn(),
+			                                              ${reply.code});
 		return true;
 		%}
 

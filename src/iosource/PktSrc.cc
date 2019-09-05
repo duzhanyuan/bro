@@ -3,13 +3,15 @@
 #include <errno.h>
 #include <sys/stat.h>
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "util.h"
 #include "PktSrc.h"
 #include "Hash.h"
 #include "Net.h"
 #include "Sessions.h"
+#include "broker/Manager.h"
+#include "iosource/Manager.h"
 
 #include "pcap/pcap.bif.h"
 
@@ -57,7 +59,7 @@ int PktSrc::LinkType() const
 	return IsOpen() ? props.link_type : -1;
 	}
 
-uint32 PktSrc::Netmask() const
+uint32_t PktSrc::Netmask() const
 	{
 	return IsOpen() ? props.netmask : NETMASK_UNKNOWN;
 	}
@@ -157,21 +159,6 @@ double PktSrc::CheckPseudoTime()
 
 	if ( ! ExtractNextPacketInternal() )
 		return 0;
-
-	if ( remote_trace_sync_interval )
-		{
-		if ( next_sync_point == 0 || current_packet.time >= next_sync_point )
-			{
-			int n = remote_serializer->SendSyncPoint();
-			next_sync_point = first_timestamp +
-						n * remote_trace_sync_interval;
-			remote_serializer->Log(RemoteSerializer::LogInfo,
-				fmt("stopping at packet %.6f, next sync-point at %.6f",
-					current_packet.time, next_sync_point));
-
-			return 0;
-			}
-		}
 
 	double pseudo_time = current_packet.time - first_timestamp;
 	double ct = (current_time(true) - first_wallclock) * pseudo_realtime;
@@ -304,13 +291,10 @@ bool PktSrc::ExtractNextPacketInternal()
 		return 1;
 		}
 
-	if ( pseudo_realtime && using_communication && ! IsOpen() )
+	if ( pseudo_realtime && ! IsOpen() )
 		{
-		// Source has gone dry, we're done.
-		if ( remote_trace_sync_interval )
-			remote_serializer->SendFinalSyncPoint();
-		else
-			remote_serializer->Terminate();
+		if ( broker_mgr->Active() )
+			iosource_mgr->Terminate();
 		}
 
 	SetIdle(true);

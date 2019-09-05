@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "util-config.h"
 
 #ifdef TIME_WITH_SYS_TIME
@@ -20,6 +20,7 @@
 #endif
 
 #include <string>
+#include <array>
 #include <vector>
 #include <algorithm>
 #include <ctype.h>
@@ -41,6 +42,7 @@
 # include <malloc.h>
 #endif
 
+#include "digest.h"
 #include "input.h"
 #include "util.h"
 #include "Obj.h"
@@ -49,13 +51,16 @@
 #include "Net.h"
 #include "Reporter.h"
 #include "iosource/Manager.h"
+#include "ConvertUTF.h"
 
 /**
- * Return IP address without enclosing brackets and any leading 0x.
+ * Return IP address without enclosing brackets and any leading 0x.  Also
+ * trims leading/trailing whitespace.
  */
 std::string extract_ip(const std::string& i)
 	{
-	std::string s(skip_whitespace(i.c_str()));
+	std::string s(strstrip(i));
+
 	if ( s.size() > 0 && s[0] == '[' )
 		s.erase(0, 1);
 
@@ -448,14 +453,14 @@ template int atoi_n<uint32_t>(int len, const char* s, const char** end, int base
 template int atoi_n<int64_t>(int len, const char* s, const char** end, int base, int64_t& result);
 template int atoi_n<uint64_t>(int len, const char* s, const char** end, int base, uint64_t& result);
 
-char* uitoa_n(uint64 value, char* str, int n, int base, const char* prefix)
+char* uitoa_n(uint64_t value, char* str, int n, int base, const char* prefix)
 	{
 	static char dig[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 	assert(n);
 
 	int i = 0;
-	uint64 v;
+	uint64_t v;
 	char* p, *q;
 	char c;
 
@@ -542,7 +547,7 @@ const char* fmt_bytes(const char* data, int len)
 	return buf;
 	}
 
-const char* fmt(const char* format, ...)
+const char* fmt(const char* format, va_list al)
 	{
 	static char* buf = 0;
 	static unsigned int buf_len = 1024;
@@ -550,26 +555,32 @@ const char* fmt(const char* format, ...)
 	if ( ! buf )
 		buf = (char*) safe_malloc(buf_len);
 
-	va_list al;
-	va_start(al, format);
+	va_list alc;
+	va_copy(alc, al);
 	int n = safe_vsnprintf(buf, buf_len, format, al);
-	va_end(al);
 
 	if ( (unsigned int) n >= buf_len )
 		{ // Not enough room, grow the buffer.
 		buf_len = n + 32;
 		buf = (char*) safe_realloc(buf, buf_len);
 
-		// Is it portable to restart?
-		va_start(al, format);
-		n = safe_vsnprintf(buf, buf_len, format, al);
-		va_end(al);
+		n = safe_vsnprintf(buf, buf_len, format, alc);
 
 		if ( (unsigned int) n >= buf_len )
 			reporter->InternalError("confusion reformatting in fmt()");
 		}
 
+	va_end(alc);
 	return buf;
+	}
+
+const char* fmt(const char* format, ...)
+	{
+	va_list al;
+	va_start(al, format);
+	auto rval = fmt(format, al);
+	va_end(al);
+	return rval;
 	}
 
 const char* fmt_access_time(double t)
@@ -696,26 +707,26 @@ std::string strstrip(std::string s)
 	}
 
 bool hmac_key_set = false;
-uint8 shared_hmac_md5_key[16];
+uint8_t shared_hmac_md5_key[16];
 
 bool siphash_key_set = false;
-uint8 shared_siphash_key[SIPHASH_KEYLEN];
+uint8_t shared_siphash_key[SIPHASH_KEYLEN];
 
 void hmac_md5(size_t size, const unsigned char* bytes, unsigned char digest[16])
 	{
 	if ( ! hmac_key_set )
 		reporter->InternalError("HMAC-MD5 invoked before the HMAC key is set");
 
-	MD5(bytes, size, digest);
+	internal_md5(bytes, size, digest);
 
 	for ( int i = 0; i < 16; ++i )
 		digest[i] ^= shared_hmac_md5_key[i];
 
-	MD5(digest, 16, digest);
+	internal_md5(digest, 16, digest);
 	}
 
-static bool read_random_seeds(const char* read_file, uint32* seed,
-				uint32* buf, int bufsiz)
+static bool read_random_seeds(const char* read_file, uint32_t* seed,
+				uint32_t* buf, int bufsiz)
 	{
 	FILE* f = 0;
 
@@ -750,8 +761,8 @@ static bool read_random_seeds(const char* read_file, uint32* seed,
 	return true;
 	}
 
-static bool write_random_seeds(const char* write_file, uint32 seed,
-				uint32* buf, int bufsiz)
+static bool write_random_seeds(const char* write_file, uint32_t seed,
+				uint32_t* buf, int bufsiz)
 	{
 	FILE* f = 0;
 
@@ -795,11 +806,11 @@ void bro_srandom(unsigned int seed)
 void init_random_seed(const char* read_file, const char* write_file)
 	{
 	static const int bufsiz = 20;
-	uint32 buf[bufsiz];
+	uint32_t buf[bufsiz];
 	memset(buf, 0, sizeof(buf));
 	int pos = 0;	// accumulates entropy
 	bool seeds_done = false;
-	uint32 seed = 0;
+	uint32_t seed = 0;
 
 	if ( read_file )
 		{
@@ -814,7 +825,7 @@ void init_random_seed(const char* read_file, const char* write_file)
 		{
 		// Gather up some entropy.
 		gettimeofday((struct timeval *)(buf + pos), 0);
-		pos += sizeof(struct timeval) / sizeof(uint32);
+		pos += sizeof(struct timeval) / sizeof(uint32_t);
 
 		// use urandom. For reasons see e.g. http://www.2uo.de/myths-about-urandom/
 #if defined(O_NONBLOCK)
@@ -828,11 +839,11 @@ void init_random_seed(const char* read_file, const char* write_file)
 		if ( fd >= 0 )
 			{
 			int amt = read(fd, buf + pos,
-					sizeof(uint32) * (bufsiz - pos));
+					sizeof(uint32_t) * (bufsiz - pos));
 			safe_close(fd);
 
 			if ( amt > 0 )
-				pos += amt / sizeof(uint32);
+				pos += amt / sizeof(uint32_t);
 			else
 				// Clear errno, which can be set on some
 				// systems due to a lack of entropy.
@@ -865,7 +876,7 @@ void init_random_seed(const char* read_file, const char* write_file)
 	if ( ! hmac_key_set )
 		{
 		assert(sizeof(buf) - 16 == 64);
-		MD5((const u_char*) buf, sizeof(buf) - 16, shared_hmac_md5_key); // The last 128 bits of buf are for siphash
+		internal_md5((const u_char*) buf, sizeof(buf) - 16, shared_hmac_md5_key); // The last 128 bits of buf are for siphash
 		hmac_key_set = true;
 		}
 
@@ -919,9 +930,9 @@ long int bro_random()
 	}
 
 // Returns a 64-bit random string.
-uint64 rand64bit()
+uint64_t rand64bit()
 	{
-	uint64 base = 0;
+	uint64_t base = 0;
 	int i;
 
 	for ( i = 1; i <= 4; ++i )
@@ -948,10 +959,10 @@ const std::string& bro_path()
 	{
 	if ( bro_path_value.empty() )
 		{
-		const char* path = getenv("BROPATH");
+		const char* path = zeekenv("ZEEKPATH");
 
 		if ( ! path )
-			path = DEFAULT_BROPATH;
+			path = DEFAULT_ZEEKPATH;
 
 		bro_path_value = path;
 		}
@@ -969,7 +980,7 @@ extern void add_to_bro_path(const string& dir)
 
 const char* bro_plugin_path()
 	{
-	const char* path = getenv("BRO_PLUGIN_PATH");
+	const char* path = zeekenv("ZEEK_PLUGIN_PATH");
 
 	if ( ! path )
 		path = BRO_PLUGIN_INSTALL_PATH;
@@ -979,7 +990,7 @@ const char* bro_plugin_path()
 
 const char* bro_plugin_activate()
 	{
-	const char* names = getenv("BRO_PLUGIN_ACTIVATE");
+	const char* names = zeekenv("ZEEK_PLUGIN_ACTIVATE");
 
 	if ( ! names )
 		names = "";
@@ -991,16 +1002,30 @@ string bro_prefixes()
 	{
 	string rval;
 
-	loop_over_list(prefixes, j)
-		if ( j == 0 )
-			rval.append(prefixes[j]);
-		else
-			rval.append(":").append(prefixes[j]);
+	for ( const auto& prefix : prefixes )
+		{
+		if ( ! rval.empty() )
+			rval.append(":");
+		rval.append(prefix);
+		}
 
 	return rval;
 	}
 
-const char* PACKAGE_LOADER = "__load__.bro";
+const array<string, 2> script_extensions = {".zeek", ".bro"};
+
+bool is_package_loader(const string& path)
+	{
+	string filename(std::move(SafeBasename(path).result));
+
+	for ( const string& ext : script_extensions )
+		{
+		if ( filename == "__load__" + ext )
+			return true;
+		}
+
+	return false;
+	}
 
 FILE* open_file(const string& path, const string& mode)
 	{
@@ -1012,7 +1037,7 @@ FILE* open_file(const string& path, const string& mode)
 	if ( ! rval )
 		{
 		char buf[256];
-		strerror_r(errno, buf, sizeof(buf));
+		bro_strerror_r(errno, buf, sizeof(buf));
 		reporter->Error("Failed to open file %s: %s", filename, buf);
 		}
 
@@ -1027,13 +1052,22 @@ static bool can_read(const string& path)
 FILE* open_package(string& path, const string& mode)
 	{
 	string arg_path = path;
-	path.append("/").append(PACKAGE_LOADER);
+	path.append("/__load__");
 
-	if ( can_read(path) )
-		return open_file(path, mode);
+	for ( const string& ext : script_extensions )
+		{
+		string p = path + ext;
+		if ( can_read(p) )
+			{
+			path.append(ext);
+			return open_file(path, mode);
+			}
+		}
 
+	path.append(script_extensions[0]);
+	string package_loader = "__load__" + script_extensions[0];
 	reporter->Error("Failed to open package '%s': missing '%s' file",
-	                arg_path.c_str(), PACKAGE_LOADER);
+	                arg_path.c_str(), package_loader.c_str());
 	return 0;
 	}
 
@@ -1116,7 +1150,7 @@ string flatten_script_name(const string& name, const string& prefix)
 	if ( ! rval.empty() )
 		rval.append(".");
 
-	if ( SafeBasename(name).result == PACKAGE_LOADER )
+	if ( is_package_loader(name) )
 		rval.append(SafeDirname(name).result);
 	else
 		rval.append(name);
@@ -1214,7 +1248,7 @@ string without_bropath_component(const string& path)
 	}
 
 static string find_file_in_path(const string& filename, const string& path,
-                                const string& opt_ext = "")
+                                const vector<string>& opt_ext)
 	{
 	if ( filename.empty() )
 		return string();
@@ -1232,10 +1266,13 @@ static string find_file_in_path(const string& filename, const string& path,
 
 	if ( ! opt_ext.empty() )
 		{
-		string with_ext = abs_path + '.' + opt_ext;
+		for ( const string& ext : opt_ext )
+			{
+			string with_ext = abs_path + ext;
 
-		if ( can_read(with_ext) )
-			return with_ext;
+			if ( can_read(with_ext) )
+				return with_ext;
+			}
 		}
 
 	if ( can_read(abs_path) )
@@ -1250,12 +1287,50 @@ string find_file(const string& filename, const string& path_set,
 	vector<string> paths;
 	tokenize_string(path_set, ":", &paths);
 
+	vector<string> ext;
+	if ( ! opt_ext.empty() )
+		ext.push_back(opt_ext);
+
 	for ( size_t n = 0; n < paths.size(); ++n )
 		{
-		string f = find_file_in_path(filename, paths[n], opt_ext);
+		string f = find_file_in_path(filename, paths[n], ext);
 
 		if ( ! f.empty() )
 			return f;
+		}
+
+	return string();
+	}
+
+static bool ends_with(const std::string& s, const std::string& ending)
+	{
+	if ( ending.size() > s.size() )
+		return false;
+
+	return std::equal(ending.rbegin(), ending.rend(), s.rbegin());
+	}
+
+string find_script_file(const string& filename, const string& path_set)
+	{
+	vector<string> paths;
+	tokenize_string(path_set, ":", &paths);
+
+	vector<string> ext(script_extensions.begin(), script_extensions.end());
+
+	for ( size_t n = 0; n < paths.size(); ++n )
+		{
+		string f = find_file_in_path(filename, paths[n], ext);
+
+		if ( ! f.empty() )
+			return f;
+		}
+
+	if ( ends_with(filename, ".bro") )
+		{
+		// We were looking for a file explicitly ending in .bro and didn't
+		// find it, so fall back to one ending in .zeek, if it exists.
+		auto fallback = string(filename.data(), filename.size() - 4) + ".zeek";
+		return find_script_file(fallback, path_set);
 		}
 
 	return string();
@@ -1266,7 +1341,7 @@ FILE* rotate_file(const char* name, RecordVal* rotate_info)
 	// Build file names.
 	const int buflen = strlen(name) + 128;
 
-	char tmpname[buflen], newname[buflen+4];
+	char newname[buflen], tmpname[buflen+4];
 
 	safe_snprintf(newname, buflen, "%s.%d.%.06f.tmp",
 			name, getpid(), network_time);
@@ -1315,7 +1390,7 @@ FILE* rotate_file(const char* name, RecordVal* rotate_info)
 
 const char* log_file_name(const char* tag)
 	{
-	const char* env = getenv("BRO_LOG_SUFFIX");
+	const char* env = zeekenv("ZEEK_LOG_SUFFIX");
 	return fmt("%s.%s", tag, (env ? env : "log"));
 	}
 
@@ -1396,9 +1471,13 @@ void _set_processing_status(const char* status)
 	if ( fd < 0 )
 		{
 		char buf[256];
-		strerror_r(errno, buf, sizeof(buf));
-		reporter->Error("Failed to open process status file '%s': %s",
-		                proc_status_file, buf);
+		bro_strerror_r(errno, buf, sizeof(buf));
+		if ( reporter )
+			reporter->Error("Failed to open process status file '%s': %s",
+			                proc_status_file, buf);
+		else
+			fprintf(stderr, "Failed to open process status file '%s': %s\n",
+			                proc_status_file, buf);
 		errno = old_errno;
 		return;
 		}
@@ -1430,13 +1509,11 @@ double current_time(bool real)
 
 	double t = double(tv.tv_sec) + double(tv.tv_usec) / 1e6;
 
-	const iosource::Manager::PktSrcList& pkt_srcs(iosource_mgr->GetPktSrcs());
-
-	if ( ! pseudo_realtime || real || pkt_srcs.empty() )
+	if ( ! pseudo_realtime || real || ! iosource_mgr || iosource_mgr->GetPktSrcs().empty() )
 		return t;
 
 	// This obviously only works for a single source ...
-	iosource::PktSrc* src = pkt_srcs.front();
+	iosource::PktSrc* src = iosource_mgr->GetPktSrcs().front();
 
 	if ( net_is_processing_suspended() )
 		return src->CurrentPacketTimestamp();
@@ -1468,12 +1545,12 @@ int time_compare(struct timeval* tv_a, struct timeval* tv_b)
 
 struct UIDEntry {
 	UIDEntry() : key(0, 0), needs_init(true) { }
-	UIDEntry(const uint64 i) : key(i, 0), needs_init(false) { }
+	UIDEntry(const uint64_t i) : key(i, 0), needs_init(false) { }
 
 	struct UIDKey {
-		UIDKey(uint64 i, uint64 c) : instance(i), counter(c) { }
-		uint64 instance;
-		uint64 counter;
+		UIDKey(uint64_t i, uint64_t c) : instance(i), counter(c) { }
+		uint64_t instance;
+		uint64_t counter;
 	} key;
 
 	bool needs_init;
@@ -1481,14 +1558,14 @@ struct UIDEntry {
 
 static std::vector<UIDEntry> uid_pool;
 
-uint64 calculate_unique_id()
+uint64_t calculate_unique_id()
 	{
 	return calculate_unique_id(UID_POOL_DEFAULT_INTERNAL);
 	}
 
-uint64 calculate_unique_id(size_t pool)
+uint64_t calculate_unique_id(size_t pool)
 	{
-	uint64 uid_instance = 0;
+	uint64_t uid_instance = 0;
 
 	if( pool >= uid_pool.size() )
 		{
@@ -1512,7 +1589,7 @@ uint64 calculate_unique_id(size_t pool)
 			// globally unique.
 			struct {
 				char hostname[120];
-				uint64 pool;
+				uint64_t pool;
 				struct timeval time;
 				pid_t pid;
 				int rnd;
@@ -1522,7 +1599,7 @@ uint64 calculate_unique_id(size_t pool)
 			gethostname(unique.hostname, 120);
 			unique.hostname[sizeof(unique.hostname)-1] = '\0';
 			gettimeofday(&unique.time, 0);
-			unique.pool = (uint64) pool;
+			unique.pool = (uint64_t) pool;
 			unique.pid = getpid();
 			unique.rnd = bro_random();
 
@@ -1612,7 +1689,7 @@ void safe_close(int fd)
 	if ( close(fd) < 0 && errno != EINTR )
 		{
 		char buf[128];
-		strerror_r(errno, buf, sizeof(buf));
+		bro_strerror_r(errno, buf, sizeof(buf));
 		fprintf(stderr, "safe_close error %d: %s\n", errno, buf);
 		abort();
 		}
@@ -1629,9 +1706,9 @@ extern "C" void out_of_memory(const char* where)
 	abort();
 	}
 
-void get_memory_usage(uint64* total, uint64* malloced)
+void get_memory_usage(uint64_t* total, uint64_t* malloced)
 	{
-	uint64 ret_total;
+	uint64_t ret_total;
 
 #ifdef HAVE_MALLINFO
 	struct mallinfo mi = mallinfo();
@@ -1744,4 +1821,117 @@ std::string canonify_name(const std::string& name)
 		}
 
 	return nname;
+	}
+
+static void strerror_r_helper(char* result, char* buf, size_t buflen)
+	{
+	// Seems the GNU flavor of strerror_r may return a pointer to a static
+	// string. So try to copy as much as possible into desired buffer.
+	auto len = strlen(result);
+	strncpy(buf, result, buflen);
+
+	if ( len >= buflen )
+		buf[buflen - 1] = 0;
+	}
+
+static void strerror_r_helper(int result, char* buf, size_t buflen)
+	{ /* XSI flavor of strerror_r, no-op. */ }
+
+void bro_strerror_r(int bro_errno, char* buf, size_t buflen)
+	{
+	auto res = strerror_r(bro_errno, buf, buflen);
+	// GNU vs. XSI flavors make it harder to use strerror_r.
+	strerror_r_helper(res, buf, buflen);
+	}
+
+static const std::map<const char*, const char*, CompareString> legacy_vars = {
+	{ "ZEEKPATH", "BROPATH" },
+	{ "ZEEK_PLUGIN_PATH", "BRO_PLUGIN_PATH" },
+	{ "ZEEK_PLUGIN_ACTIVATE", "BRO_PLUGIN_ACTIVATE" },
+	{ "ZEEK_PREFIXES", "BRO_PREFIXES" },
+	{ "ZEEK_DNS_FAKE", "BRO_DNS_FAKE" },
+	{ "ZEEK_SEED_FILE", "BRO_SEED_FILE" },
+	{ "ZEEK_LOG_SUFFIX", "BRO_LOG_SUFFIX" },
+	{ "ZEEK_PROFILER_FILE", "BRO_PROFILER_FILE" },
+	{ "ZEEK_DISABLE_ZEEKYGEN", "BRO_DISABLE_BROXYGEN" },
+	{ "ZEEK_DEFAULT_CONNECT_RETRY", "BRO_DEFAULT_CONNECT_RETRY" },
+	{ "ZEEK_BROKER_MAX_THREADS", "BRO_BROKER_MAX_THREADS" },
+	{ "ZEEK_DEFAULT_LISTEN_ADDRESS", "BRO_DEFAULT_LISTEN_ADDRESS" },
+	{ "ZEEK_DEFAULT_LISTEN_RETRY", "BRO_DEFAULT_LISTEN_RETRY" },
+};
+
+char* zeekenv(const char* name)
+	{
+	auto rval = getenv(name);
+
+	if ( rval )
+		return rval;
+
+	auto it = legacy_vars.find(name);
+
+	if ( it == legacy_vars.end() )
+		return rval;
+
+	return getenv(it->second);
+	}
+
+static string json_escape_byte(char c)
+	{
+	char hex[2] = {'0', '0'};
+	bytetohex(c, hex);
+
+	string result = "\\x";
+	result.append(hex, 2);
+
+	return result;
+	}
+
+string json_escape_utf8(const string& val)
+	{
+	string result;
+	result.reserve(val.length());
+
+	auto val_data = reinterpret_cast<const unsigned char*>(val.c_str());
+
+	size_t idx;
+	for ( idx = 0; idx < val.length(); )
+		{
+		// Normal ASCII characters plus a few of the control characters can be inserted directly. The rest of
+		// the control characters should be escaped as regular bytes.
+		if ( ( val[idx] >= 32 && val[idx] <= 127 ) ||
+		       val[idx] == '\b' || val[idx] == '\f' || val[idx] == '\n' || val[idx] == '\r' || val[idx] == '\t' )
+			{
+			result.push_back(val[idx]);
+			++idx;
+			continue;
+			}
+		else if ( val[idx] >= 0 && val[idx] < 32 )
+			{
+			result.append(json_escape_byte(val[idx]));
+			++idx;
+			continue;
+			}
+
+		// Find out how long the next character should be.
+		unsigned int char_size = getNumBytesForUTF8(val[idx]);
+
+		// If it says that it's a single character or it's not an invalid string UTF8 sequence, insert the one
+		// escaped byte into the string, step forward one, and go to the next character.
+		if ( char_size == 0 || idx+char_size > val.length() || isLegalUTF8Sequence(val_data+idx, val_data+idx+char_size) == 0 )
+			{
+			result.append(json_escape_byte(val[idx]));
+			++idx;
+			continue;
+			}
+
+		for ( size_t step = 0; step < char_size; step++, idx++ )
+			result.push_back(val[idx]);
+		}
+
+	// Insert any of the remaining bytes into the string as escaped bytes
+	if ( idx != val.length() )
+		for ( ; idx < val.length(); ++idx )
+			result.append(json_escape_byte(val[idx]));
+
+	return result;
 	}

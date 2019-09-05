@@ -5,10 +5,8 @@
 #include "Hash.h"
 #include "Val.h"
 
-#include "protocol/backdoor/BackDoor.h"
 #include "protocol/conn-size/ConnSize.h"
 #include "protocol/icmp/ICMP.h"
-#include "protocol/interconn/InterConn.h"
 #include "protocol/pia/PIA.h"
 #include "protocol/stepping-stone/SteppingStone.h"
 #include "protocol/tcp/TCP.h"
@@ -21,12 +19,12 @@
 using namespace analyzer;
 
 Manager::ConnIndex::ConnIndex(const IPAddr& _orig, const IPAddr& _resp,
-				     uint16 _resp_p, uint16 _proto)
+				     uint16_t _resp_p, uint16_t _proto)
 	{
-	if ( _orig == IPAddr(string("0.0.0.0")) )
+	if ( _orig == IPAddr::v4_unspecified )
 		// don't use the IPv4 mapping, use the literal unspecified address
 		// to indicate a wildcard
-		orig = IPAddr(string("::"));
+		orig = IPAddr::v6_unspecified;
 	else
 		orig = _orig;
 
@@ -37,7 +35,7 @@ Manager::ConnIndex::ConnIndex(const IPAddr& _orig, const IPAddr& _resp,
 
 Manager::ConnIndex::ConnIndex()
 	{
-	orig = resp = IPAddr("0.0.0.0");
+	orig = resp = IPAddr::v4_unspecified;
 	resp_p = 0;
 	proto = 0;
 	}
@@ -87,21 +85,31 @@ Manager::~Manager()
 void Manager::InitPreScript()
 	{
 	// Cache these tags.
-	analyzer_backdoor = GetComponentTag("BACKDOOR");
 	analyzer_connsize = GetComponentTag("CONNSIZE");
-	analyzer_interconn = GetComponentTag("INTERCONN");
 	analyzer_stepping = GetComponentTag("STEPPINGSTONE");
 	analyzer_tcpstats = GetComponentTag("TCPSTATS");
 	}
 
 void Manager::InitPostScript()
 	{
+	auto id = global_scope()->Lookup("Tunnel::vxlan_ports");
+
+	if ( ! (id && id->ID_Val()) )
+		reporter->FatalError("Tunnel::vxlan_ports not defined");
+
+	auto table_val = id->ID_Val()->AsTableVal();
+	auto port_list = table_val->ConvertToPureList();
+
+	for ( auto i = 0; i < port_list->Length(); ++i )
+		vxlan_ports.emplace_back(port_list->Index(i)->AsPortVal()->Port());
+
+	Unref(port_list);
 	}
 
 void Manager::DumpDebug()
 	{
 #ifdef DEBUG
-	DBG_LOG(DBG_ANALYZER, "Available analyzers after bro_init():");
+	DBG_LOG(DBG_ANALYZER, "Available analyzers after zeek_init():");
 	list<Component*> all_analyzers = GetComponents();
 	for ( list<Component*>::const_iterator i = all_analyzers.begin(); i != all_analyzers.end(); ++i )
 		DBG_LOG(DBG_ANALYZER, "    %s (%s)", (*i)->Name().c_str(),
@@ -247,7 +255,7 @@ bool Manager::UnregisterAnalyzerForPort(EnumVal* val, PortVal* port)
 	return UnregisterAnalyzerForPort(p->Tag(), port->PortType(), port->Port());
 	}
 
-bool Manager::RegisterAnalyzerForPort(Tag tag, TransportProto proto, uint32 port)
+bool Manager::RegisterAnalyzerForPort(Tag tag, TransportProto proto, uint32_t port)
 	{
 	tag_set* l = LookupPort(proto, port, true);
 
@@ -263,7 +271,7 @@ bool Manager::RegisterAnalyzerForPort(Tag tag, TransportProto proto, uint32 port
 	return true;
 	}
 
-bool Manager::UnregisterAnalyzerForPort(Tag tag, TransportProto proto, uint32 port)
+bool Manager::UnregisterAnalyzerForPort(Tag tag, TransportProto proto, uint32_t port)
 	{
 	tag_set* l = LookupPort(proto, port, true);
 
@@ -318,7 +326,7 @@ Analyzer* Manager::InstantiateAnalyzer(const char* name, Connection* conn)
 	return tag ? InstantiateAnalyzer(tag, conn) : 0;
 	}
 
-Manager::tag_set* Manager::LookupPort(TransportProto proto, uint32 port, bool add_if_not_found)
+Manager::tag_set* Manager::LookupPort(TransportProto proto, uint32_t port, bool add_if_not_found)
 	{
 	analyzer_map_by_port* m = 0;
 
@@ -434,28 +442,20 @@ bool Manager::BuildInitialAnalyzerTree(Connection* conn)
 
 		if ( tcp_contents && ! reass )
 			{
-			PortVal dport(ntohs(conn->RespPort()), TRANSPORT_TCP);
+			auto dport = val_mgr->GetPort(ntohs(conn->RespPort()), TRANSPORT_TCP);
 			Val* result;
 
 			if ( ! reass )
-				reass = tcp_content_delivery_ports_orig->Lookup(&dport);
+				reass = tcp_content_delivery_ports_orig->Lookup(dport);
 
 			if ( ! reass )
-				reass = tcp_content_delivery_ports_resp->Lookup(&dport);
+				reass = tcp_content_delivery_ports_resp->Lookup(dport);
+
+			Unref(dport);
 			}
 
 		if ( reass )
 			tcp->EnableReassembly();
-
-		if ( IsEnabled(analyzer_backdoor) )
-			// Add a BackDoor analyzer if requested.  This analyzer
-			// can handle both reassembled and non-reassembled input.
-			tcp->AddChildAnalyzer(new backdoor::BackDoor_Analyzer(conn), false);
-
-		if ( IsEnabled(analyzer_interconn) )
-			// Add a InterConn analyzer if requested.  This analyzer
-			// can handle both reassembled and non-reassembled input.
-			tcp->AddChildAnalyzer(new interconn::InterConn_Analyzer(conn), false);
 
 		if ( IsEnabled(analyzer_stepping) )
 			{
@@ -464,7 +464,7 @@ bool Manager::BuildInitialAnalyzerTree(Connection* conn)
 			// handle non-reassembled data, it doesn't really fit into
 			// our general framing ...  Better would be to turn it
 			// on *after* we discover we have interactive traffic.
-			uint16 resp_port = ntohs(conn->RespPort());
+			uint16_t resp_port = ntohs(conn->RespPort());
 			if ( resp_port == 22 || resp_port == 23 || resp_port == 513 )
 				{
 				AddrVal src(conn->OrigAddr());
@@ -541,7 +541,7 @@ void Manager::ExpireScheduledAnalyzers()
 	}
 
 void Manager::ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp,
-			uint16 resp_p,
+			uint16_t resp_p,
 			TransportProto proto, Tag analyzer,
 			double timeout)
 	{
@@ -566,7 +566,7 @@ void Manager::ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp,
 	}
 
 void Manager::ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp,
-			uint16 resp_p,
+			uint16_t resp_p,
 			TransportProto proto, const char* analyzer,
 			double timeout)
 	{
@@ -596,7 +596,7 @@ Manager::tag_set Manager::GetScheduled(const Connection* conn)
 		result.insert(i->second->analyzer);
 
 	// Try wildcard for originator.
-	c.orig = IPAddr(string("::"));
+	c.orig = IPAddr::v6_unspecified;
 	all = conns.equal_range(c);
 
 	for ( conns_map::iterator i = all.first; i != all.second; i++ )

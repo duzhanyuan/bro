@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <sys/types.h>
 #ifdef TIME_WITH_SYS_TIME
@@ -27,16 +27,12 @@
 #include "Reporter.h"
 #include "Net.h"
 #include "Anon.h"
-#include "Serializer.h"
 #include "PacketDumper.h"
 #include "iosource/Manager.h"
 #include "iosource/PktSrc.h"
 #include "iosource/PktDumper.h"
 #include "plugin/Manager.h"
-
-#ifdef ENABLE_BROKER
 #include "broker/Manager.h"
-#endif
 
 extern "C" {
 #include "setsignal.h"
@@ -52,8 +48,6 @@ int reading_live = 0;
 int reading_traces = 0;
 int have_pending_timers = 0;
 double pseudo_realtime = 0.0;
-bool using_communication = false;
-
 double network_time = 0.0;	// time according to last packet timestamp
 				// (or current time)
 double processing_start_time = 0.0;	// time started working on current pkt
@@ -61,6 +55,7 @@ double bro_start_time = 0.0; // time Bro started.
 double bro_start_network_time;	// timestamp of first packet
 double last_watchdog_proc_time = 0.0;	// value of above during last watchdog
 bool terminating = false;	// whether we're done reading and finishing up
+bool is_parsing = false;
 
 const Packet *current_pkt = 0;
 int current_dispatched = 0;
@@ -190,7 +185,7 @@ void net_init(name_list& interfaces, name_list& readfiles,
 	else
 		// have_pending_timers = 1, possibly.  We don't set
 		// that here, though, because at this point we don't know
-		// whether the user's bro_init() event will indeed set
+		// whether the user's zeek_init() event will indeed set
 		// a timer.
 		reading_traces = reading_live = 0;
 
@@ -254,12 +249,12 @@ void net_packet_dispatch(double t, const Packet* pkt, iosource::PktSrc* src_ps)
 
 	if ( load_sample )
 		{
-		static uint32 load_freq = 0;
+		static uint32_t load_freq = 0;
 
 		if ( load_freq == 0 )
-			load_freq = uint32(0xffffffff) / uint32(load_sample_freq);
+			load_freq = uint32_t(0xffffffff) / uint32_t(load_sample_freq);
 
-		if ( uint32(bro_random() & 0xffffffff) < load_freq )
+		if ( uint32_t(bro_random() & 0xffffffff) < load_freq )
 			{
 			// Drain the queued timer events so they're not
 			// charged against this sample.
@@ -311,11 +306,7 @@ void net_run()
 			}
 #endif
 		current_iosrc = src;
-		bool communication_enabled = using_communication;
-
-#ifdef ENABLE_BROKER
-		communication_enabled |= broker_mgr->Enabled();
-#endif
+		auto communication_enabled = broker_mgr->Active();
 
 		if ( src )
 			src->Process();	// which will call net_packet_dispatch()
@@ -333,7 +324,8 @@ void net_run()
 				}
 			}
 
-		else if ( (have_pending_timers || communication_enabled) &&
+		else if ( (have_pending_timers || communication_enabled ||
+		           BifConst::exit_only_after_terminate) &&
 			  ! pseudo_realtime )
 			{
 			// Take advantage of the lull to get up to
@@ -377,15 +369,28 @@ void net_run()
 			// current packet and its related events.
 			termination_signal();
 
-#ifdef DEBUG_COMMUNICATION
-		if ( signal_val == SIGPROF && remote_serializer )
-			remote_serializer->DumpDebugData();
-#endif
-
 		if ( ! reading_traces )
 			// Check whether we have timers scheduled for
 			// the future on which we need to wait.
 			have_pending_timers = timer_mgr->Size() > 0;
+
+		if ( pseudo_realtime && communication_enabled )
+			{
+			auto have_active_packet_source = false;
+
+			for ( auto& ps : iosource_mgr->GetPktSrcs() )
+				{
+				if ( ps->IsOpen() )
+					{
+					have_active_packet_source = true;
+					break;
+					}
+				}
+
+			if (  ! have_active_packet_source )
+				// Can turn off pseudo realtime now
+				pseudo_realtime = 0;
+			}
 		}
 
 	// Get the final statistics now, and not when net_finish() is
@@ -408,7 +413,7 @@ void net_get_final_stats()
 			{
 			iosource::PktSrc::Stats s;
 			ps->Statistics(&s);
-			reporter->Info("%d packets received on interface %s, %d dropped",
+			reporter->Info("%" PRIu64 " packets received on interface %s, %" PRIu64 " dropped",
 					s.received, ps->Path().c_str(), s.dropped);
 			}
 		}

@@ -11,12 +11,12 @@ namespace analyzer { namespace xmpp {
 
 class XMPP_Analyzer : public tcp::TCP_ApplicationAnalyzer {
 public:
-	XMPP_Analyzer(Connection* conn);
-	virtual ~XMPP_Analyzer();
+	explicit XMPP_Analyzer(Connection* conn);
+	~XMPP_Analyzer() override;
 
 	void Done() override;
 	void DeliverStream(int len, const u_char* data, bool orig) override;
-	void Undelivered(uint64 seq, int len, bool orig) override;
+	void Undelivered(uint64_t seq, int len, bool orig) override;
 
 	// Overriden from tcp::TCP_ApplicationAnalyzer.
 	void EndpointEOF(bool is_orig) override;

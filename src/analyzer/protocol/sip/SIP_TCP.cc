@@ -55,12 +55,11 @@ void SIP_Analyzer::DeliverStream(int len, const u_char* data, bool orig)
 		}
 	catch ( const binpac::Exception& e )
 		{
-		printf("BinPAC Exception: %s\n", e.c_msg());
-		ProtocolViolation(e.c_msg());
+		ProtocolViolation(fmt("Binpac exception: %s", e.c_msg()));
 		}
 	}
 
-void SIP_Analyzer::Undelivered(uint64 seq, int len, bool orig)
+void SIP_Analyzer::Undelivered(uint64_t seq, int len, bool orig)
 	{
 	tcp::TCP_ApplicationAnalyzer::Undelivered(seq, len, orig);
 	had_gap = true;

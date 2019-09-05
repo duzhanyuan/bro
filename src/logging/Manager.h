@@ -5,17 +5,17 @@
 #ifndef LOGGING_MANAGER_H
 #define LOGGING_MANAGER_H
 
+#include <broker/endpoint_info.hh>
+
 #include "../Val.h"
 #include "../Tag.h"
 #include "../EventHandler.h"
-#include "../RemoteSerializer.h"
 #include "../plugin/ComponentManager.h"
 
 #include "Component.h"
 #include "WriterBackend.h"
 
 class SerializationFormat;
-class RemoteSerializer;
 class RotationTimer;
 
 namespace logging {
@@ -173,7 +173,7 @@ public:
 	/**
 	 * Announces all instantiated writers to a given Broker peer.
 	 */
-	void SendAllWritersTo(const string& peer);
+	void SendAllWritersTo(const broker::endpoint_info& ei);
 
 	/**
 	 * Sets log streams buffering state. This adjusts all associated
@@ -203,14 +203,12 @@ public:
 	 */
 	void Terminate();
 
-#ifdef ENABLE_BROKER
 	/**
 	 * Enable remote logs for a given stream.
 	 * @param stream_id the stream to enable remote logs for.
-	 * @param flags tune behavior of how log entries are sent to peer endpoints.
 	 * @return true if remote logs are enabled.
 	 */
-	bool EnableRemoteLogs(EnumVal* stream_id, int flags);
+	bool EnableRemoteLogs(EnumVal* stream_id);
 
 	/**
 	 * Disable remote logs for a given stream.
@@ -229,13 +227,11 @@ public:
 	 * a given log stream.
 	 */
 	RecordType* StreamColumns(EnumVal* stream_id);
-#endif
 
 protected:
 	friend class WriterFrontend;
 	friend class RotationFinishedMessage;
 	friend class RotationFailedMessage;
-	friend class ::RemoteSerializer;
 	friend class ::RotationTimer;
 
 	// Instantiates a new WriterBackend of the given type (note that
@@ -248,9 +244,6 @@ protected:
 	WriterFrontend* CreateWriter(EnumVal* id, EnumVal* writer, WriterBackend::WriterInfo* info,
 				int num_fields, const threading::Field* const* fields,
 				bool local, bool remote, bool from_remote, const string& instantiating_filter="");
-
-	// Announces all instantiated writers to peer.
-	void SendAllWritersTo(RemoteSerializer::PeerID peer);
 
 	// Signals that a file has been rotated.
 	bool FinishedRotation(WriterFrontend* writer, const char* new_name, const char* old_name,
@@ -275,7 +268,6 @@ private:
 	void RemoveDisabledWriters(Stream* stream);
 	void InstallRotationTimer(WriterInfo* winfo);
 	void Rotate(WriterInfo* info);
-	Filter* FindFilter(EnumVal* id, StringVal* filter);
 	WriterInfo* FindWriter(WriterFrontend* writer);
 	bool CompareFields(const Filter* filter, const WriterFrontend* writer);
 	bool CheckFilterWriterConflict(const WriterInfo* winfo, const Filter* filter);

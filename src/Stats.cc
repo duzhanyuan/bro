@@ -9,17 +9,14 @@
 #include "DNS_Mgr.h"
 #include "Trigger.h"
 #include "threading/Manager.h"
-
-#ifdef ENABLE_BROKER
 #include "broker/Manager.h"
-#endif
 
-uint64 killed_by_inactivity = 0;
+uint64_t killed_by_inactivity = 0;
 
-uint64 tot_ack_events = 0;
-uint64 tot_ack_bytes = 0;
-uint64 tot_gap_events = 0;
-uint64 tot_gap_bytes = 0;
+uint64_t tot_ack_events = 0;
+uint64_t tot_ack_bytes = 0;
+uint64_t tot_gap_events = 0;
+uint64_t tot_gap_bytes = 0;
 
 
 class ProfileTimer : public Timer {
@@ -82,7 +79,7 @@ void ProfileLogger::Log()
 	struct timeval tv_utime = r.ru_utime;
 	struct timeval tv_stime = r.ru_stime;
 
-	uint64 total, malloced;
+	uint64_t total, malloced;
 	get_memory_usage(&total, &malloced);
 
 	static unsigned int first_total = 0;
@@ -135,7 +132,7 @@ void ProfileLogger::Log()
 	SessionStats s;
 	sessions->GetStats(s);
 
-	file->Write(fmt("%.06f Conns: tcp=%d/%d udp=%d/%d icmp=%d/%d\n",
+	file->Write(fmt("%.06f Conns: tcp=%lu/%lu udp=%lu/%lu icmp=%lu/%lu\n",
 		network_time,
 		s.num_TCP_conns, s.max_TCP_conns,
 		s.num_UDP_conns, s.max_UDP_conns,
@@ -226,29 +223,23 @@ void ProfileLogger::Log()
 			    ));
 		}
 
-#ifdef ENABLE_BROKER
-	auto cs = broker_mgr->ConsumeStatistics();
+	auto cs = broker_mgr->GetStatistics();
 
 	file->Write(fmt("%0.6f Comm: peers=%zu stores=%zu "
-	                "store_queries=%zu store_responses=%zu "
-	                "outgoing_conn_status=%zu incoming_conn_status=%zu "
-	                "reports=%zu\n",
-	                network_time, cs.outgoing_peer_count, cs.data_store_count,
-	                cs.pending_query_count, cs.response_count,
-	                cs.outgoing_conn_status_count, cs.incoming_conn_status_count,
-	                cs.report_count));
-
-	for ( const auto& s : cs.print_count )
-		file->Write(fmt("    %-25s prints dequeued=%zu\n", s.first.data(), s.second));
-	for ( const auto& s : cs.event_count )
-		file->Write(fmt("    %-25s events dequeued=%zu\n", s.first.data(), s.second));
-	for ( const auto& s : cs.log_count )
-		file->Write(fmt("    %-25s logs dequeued=%zu\n", s.first.data(), s.second));
-#endif
+			"pending_queries=%zu "
+			"events_in=%zu events_out=%zu "
+			"logs_in=%zu logs_out=%zu "
+			"ids_in=%zu ids_out=%zu ",
+			network_time, cs.num_peers, cs.num_stores,
+			cs.num_pending_queries,
+			cs.num_events_incoming, cs.num_events_outgoing,
+			cs.num_logs_incoming, cs.num_logs_outgoing,
+			cs.num_ids_incoming, cs.num_ids_outgoing
+		       ));
 
 	// Script-level state.
 	unsigned int size, mem = 0;
-	PDict(ID)* globals = global_scope()->Vars();
+	const auto& globals = global_scope()->Vars();
 
 	if ( expensive )
 		{
@@ -258,13 +249,13 @@ void ProfileLogger::Log()
 		file->Write(fmt("%.06f Global_sizes > 100k: %dK\n",
 				network_time, mem / 1024));
 
-		ID* id;
-		IterCookie* c = globals->InitForIteration();
+		for ( const auto& global : globals )
+			{
+			ID* id = global.second;
 
-		while ( (id = globals->NextEntry(c)) )
 			// We don't show/count internal globals as they are always
 			// contained in some other global user-visible container.
-			if ( id->HasVal() && ! id->IsInternalGlobal() )
+			if ( id->HasVal() )
 				{
 				Val* v = id->ID_Val();
 
@@ -307,6 +298,7 @@ void ProfileLogger::Log()
 						file->Write("\n");
 					}
 				}
+			}
 
 		file->Write(fmt("%.06f Global_sizes total: %dK\n",
 				network_time, mem / 1024));
@@ -319,11 +311,11 @@ void ProfileLogger::Log()
 	// (and for consistency we dispatch it *now*)
 	if ( profiling_update )
 		{
-		val_list* vl = new val_list;
 		Ref(file);
-		vl->append(new Val(file));
-		vl->append(new Val(expensive, TYPE_BOOL));
-		mgr.Dispatch(new Event(profiling_update, vl));
+		mgr.Dispatch(new Event(profiling_update, {
+			new Val(file),
+			val_mgr->GetBool(expensive),
+		}));
 		}
 	}
 
@@ -378,12 +370,12 @@ void SampleLogger::SegmentProfile(const char* /* name */,
 					const Location* /* loc */,
 					double dtime, int dmem)
 	{
-	val_list* vl = new val_list(2);
-	vl->append(load_samples->Ref());
-	vl->append(new IntervalVal(dtime, Seconds));
-	vl->append(new Val(dmem, TYPE_INT));
-
-	mgr.QueueEvent(load_sample, vl);
+	if ( load_sample )
+		mgr.QueueEventFast(load_sample, {
+			load_samples->Ref(),
+			new IntervalVal(dtime, Seconds),
+			val_mgr->GetInt(dmem)
+		});
 	}
 
 void SegmentProfiler::Init()
@@ -469,7 +461,7 @@ void PacketProfiler::ProfilePkt(double t, unsigned int bytes)
 		double curr_Rtime =
 			ptimestamp.tv_sec + ptimestamp.tv_usec / 1e6;
 
-		uint64 curr_mem;
+		uint64_t curr_mem;
 		get_memory_usage(&curr_mem, 0);
 
 		file->Write(fmt("%.06f %.03f %" PRIu64 " %" PRIu64 " %.03f %.03f %.03f %" PRIu64 "\n",

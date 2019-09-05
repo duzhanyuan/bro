@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <stdlib.h>
 
@@ -461,11 +461,10 @@ void NVT_Analyzer::SetTerminal(const u_char* terminal, int len)
 	{
 	if ( login_terminal )
 		{
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(new StringVal(new BroString(terminal, len, 0)));
-
-		ConnectionEvent(login_terminal, vl);
+		ConnectionEventFast(login_terminal, {
+			BuildConnVal(),
+			new StringVal(new BroString(terminal, len, 0)),
+		});
 		}
 	}
 
@@ -599,12 +598,20 @@ void NVT_Analyzer::ScanOption(int seq, int len, const u_char* data)
 			{
 			is_suboption = 1;
 			last_was_IAC = 0;
+
+			if ( offset >= buf_len )
+				InitBuffer(buf_len * 2);
+
 			buf[offset++] = code;
 			}
 
 		else if ( IS_3_BYTE_OPTION(code) )
 			{
 			is_suboption = 0;
+
+			if ( offset >= buf_len )
+				InitBuffer(buf_len * 2);
+
 			buf[offset++] = code;
 			}
 
@@ -639,6 +646,9 @@ void NVT_Analyzer::ScanOption(int seq, int len, const u_char* data)
 	// A suboption.  Spin looking for end.
 	for ( ; len > 0; --len, ++data )
 		{
+		if ( offset >= buf_len )
+			InitBuffer(buf_len * 2);
+
 		unsigned int code = data[0];
 
 		if ( last_was_IAC )

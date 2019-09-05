@@ -13,21 +13,21 @@ namespace analyzer { namespace ssl {
 
 class SSL_Analyzer : public tcp::TCP_ApplicationAnalyzer {
 public:
-	SSL_Analyzer(Connection* conn);
-	virtual ~SSL_Analyzer();
+	explicit SSL_Analyzer(Connection* conn);
+	~SSL_Analyzer() override;
 
 	// Overriden from Analyzer.
-	virtual void Done();
-	virtual void DeliverStream(int len, const u_char* data, bool orig);
-	virtual void Undelivered(uint64 seq, int len, bool orig);
+	void Done() override;
+	void DeliverStream(int len, const u_char* data, bool orig) override;
+	void Undelivered(uint64_t seq, int len, bool orig) override;
 
-	void SendHandshake(const u_char* begin, const u_char* end, bool orig);
+	void SendHandshake(uint16_t raw_tls_version, const u_char* begin, const u_char* end, bool orig);
 
 	// Tell the analyzer that encryption has started.
 	void StartEncryption();
 
 	// Overriden from tcp::TCP_ApplicationAnalyzer.
-	virtual void EndpointEOF(bool is_orig);
+	void EndpointEOF(bool is_orig) override;
 
 	static analyzer::Analyzer* Instantiate(Connection* conn)
 		{ return new SSL_Analyzer(conn); }

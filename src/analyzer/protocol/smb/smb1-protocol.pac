@@ -21,14 +21,14 @@ refine connection SMB_Conn += {
 		//	{ // do nothing
 		//	}
 
-		r->Assign(0, new Val(${hdr.command}, TYPE_COUNT));
-		r->Assign(1, new Val(${hdr.status}, TYPE_COUNT));
-		r->Assign(2, new Val(${hdr.flags}, TYPE_COUNT));
-		r->Assign(3, new Val(${hdr.flags2}, TYPE_COUNT));
-		r->Assign(4, new Val(${hdr.tid}, TYPE_COUNT));
-		r->Assign(5, new Val(${hdr.pid}, TYPE_COUNT));
-		r->Assign(6, new Val(${hdr.uid}, TYPE_COUNT));
-		r->Assign(7, new Val(${hdr.mid}, TYPE_COUNT));
+		r->Assign(0, val_mgr->GetCount(${hdr.command}));
+		r->Assign(1, val_mgr->GetCount(${hdr.status}));
+		r->Assign(2, val_mgr->GetCount(${hdr.flags}));
+		r->Assign(3, val_mgr->GetCount(${hdr.flags2}));
+		r->Assign(4, val_mgr->GetCount(${hdr.tid}));
+		r->Assign(5, val_mgr->GetCount(${hdr.pid}));
+		r->Assign(6, val_mgr->GetCount(${hdr.uid}));
+		r->Assign(7, val_mgr->GetCount(${hdr.mid}));
 
 		return r;
 		%}
@@ -66,9 +66,10 @@ refine connection SMB_Conn += {
 			}
 		else
 			{
-			BifEvent::generate_smb1_error(bro_analyzer(),
-			                              bro_analyzer()->Conn(),
-			                              BuildHeaderVal(h), is_orig);
+			if ( smb1_error )
+				BifEvent::generate_smb1_error(bro_analyzer(),
+				                              bro_analyzer()->Conn(),
+				                              BuildHeaderVal(h), is_orig);
 			}
 		return true;
 		%}
@@ -170,7 +171,7 @@ type SMB_Message_Request(header: SMB_Header, offset: uint16, command: uint8, is_
 #	#SMB_COM_QUERY_INFORMATION2       -> query_information2     : SMB_query_information2_request(header);
 	SMB_COM_LOCKING_ANDX             -> locking_andx           : SMB1_locking_andx_request(header, offset);
 	SMB_COM_TRANSACTION              -> transaction            : SMB1_transaction_request(header);
-#	SMB_COM_TRANSACTION_SECONDARY    -> transaction_secondary  : SMB1_transaction_secondary_request(header);
+	SMB_COM_TRANSACTION_SECONDARY     -> transaction_secondary  : SMB1_transaction_secondary_request(header);
 #	#SMB_COM_IOCTL                    -> ioctl                  : SMB_ioctl_request(header);
 #	#SMB_COM_IOCTL_SECONDARY          -> ioctl_secondary        : SMB_ioctl_secondary_request(header);
 #	#SMB_COM_COPY                     -> copy                   : SMB_copy_request(header);
@@ -179,7 +180,7 @@ type SMB_Message_Request(header: SMB_Header, offset: uint16, command: uint8, is_
 #	#SMB_COM_WRITE_AND_CLOSE          -> write_and_close        : SMB_write_and_close_request(header);
 #	#SMB_COM_NEW_FILE_SIZE            -> new_file_size          : SMB_new_file_size_request(header);
 #	#SMB_COM_CLOSE_AND_TREE_DISC      -> close_and_tree_disc    : SMB_close_and_tree_disc_request(header);
-#	#SMB_COM_TRANSACTION2_SECONDARY   -> transaction2_secondary : SMB1_transaction2_secondary_request(header);
+	SMB_COM_TRANSACTION2_SECONDARY   -> transaction2_secondary : SMB1_transaction2_secondary_request(header);
 #	#SMB_COM_FIND_CLOSE2              -> find_close2            : SMB_find_close2_request(header);
 #	#SMB_COM_FIND_NOTIFY_CLOSE        -> find_notify_close      : SMB_find_notify_close_request(header);
 #	#SMB_COM_TREE_CONNECT             -> tree_connect           : SMB_tree_connect_request(header);

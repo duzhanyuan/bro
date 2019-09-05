@@ -207,7 +207,7 @@ void BitTorrentTracker_Analyzer::ServerReply(int len, const u_char* data)
 		}
 	}
 
-void BitTorrentTracker_Analyzer::Undelivered(uint64 seq, int len, bool orig)
+void BitTorrentTracker_Analyzer::Undelivered(uint64_t seq, int len, bool orig)
 	{
 	tcp::TCP_ApplicationAnalyzer::Undelivered(seq, len, orig);
 
@@ -247,14 +247,12 @@ void BitTorrentTracker_Analyzer::DeliverWeird(const char* msg, bool orig)
 	{
 	if ( bt_tracker_weird )
 		{
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(new Val(orig, TYPE_BOOL));
-		vl->append(new StringVal(msg));
-		ConnectionEvent(bt_tracker_weird, vl);
+		ConnectionEventFast(bt_tracker_weird, {
+			BuildConnVal(),
+			val_mgr->GetBool(orig),
+			new StringVal(msg),
+		});
 		}
-	else
-		Weird(msg);
 	}
 
 bool BitTorrentTracker_Analyzer::ParseRequest(char* line)
@@ -326,8 +324,11 @@ bool BitTorrentTracker_Analyzer::ParseRequest(char* line)
 
 	case BTT_REQ_DONE:
 		if ( *line )
-			DeliverWeird(fmt("Got post request data: %s\n", line),
-					true);
+			{
+			auto msg = fmt("Got post request data: %s\n", line);
+			Weird("bittorrent_tracker_data_post_request", msg);
+			DeliverWeird(msg, true);
+			}
 		break;
 
 	default:
@@ -345,19 +346,17 @@ void BitTorrentTracker_Analyzer::RequestGet(char* uri)
 
 void BitTorrentTracker_Analyzer::EmitRequest(void)
 	{
-	val_list* vl;
-
 	ProtocolConfirmation();
 
-	vl = new val_list;
-	vl->append(BuildConnVal());
-	vl->append(req_val_uri);
-	vl->append(req_val_headers);
+	if ( bt_tracker_request )
+		ConnectionEventFast(bt_tracker_request, {
+			BuildConnVal(),
+			req_val_uri,
+			req_val_headers,
+		});
 
 	req_val_uri = 0;
 	req_val_headers = 0;
-
-	ConnectionEvent(bt_tracker_request, vl);
 	}
 
 bool BitTorrentTracker_Analyzer::ParseResponse(char* line)
@@ -403,11 +402,12 @@ bool BitTorrentTracker_Analyzer::ParseResponse(char* line)
 			{
 			if ( res_status != 200 )
 				{
-				val_list* vl = new val_list;
-				vl->append(BuildConnVal());
-				vl->append(new Val(res_status, TYPE_COUNT));
-				vl->append(res_val_headers);
-				ConnectionEvent(bt_tracker_response_not_ok, vl);
+				if ( bt_tracker_response_not_ok )
+					ConnectionEventFast(bt_tracker_response_not_ok, {
+						BuildConnVal(),
+						val_mgr->GetCount(res_status),
+						res_val_headers,
+					});
 				res_val_headers = 0;
 				res_buf_pos = res_buf + res_buf_len;
 				res_state = BTT_RES_DONE;
@@ -477,12 +477,12 @@ void BitTorrentTracker_Analyzer::ResponseBenc(int name_len, char* name,
 			// addresses in network order but PortVal's
 			// take ports in host order.  BitTorrent specifies
 			// that both are in network order here.
-			uint32 ad = extract_uint32((u_char*) value);
-			uint16 pt = ntohs((value[4] << 8) | value[5]);
+			uint32_t ad = extract_uint32((u_char*) value);
+			uint16_t pt = ntohs((value[4] << 8) | value[5]);
 
 			RecordVal* peer = new RecordVal(bittorrent_peer);
 			peer->Assign(0, new AddrVal(ad));
-			peer->Assign(1, new PortVal(pt, TRANSPORT_TCP));
+			peer->Assign(1, val_mgr->GetPort(pt, TRANSPORT_TCP));
 			res_val_peers->Assign(peer, 0);
 
 			Unref(peer);
@@ -505,7 +505,7 @@ void BitTorrentTracker_Analyzer::ResponseBenc(int name_len, char* name,
 	RecordVal* benc_value = new RecordVal(bittorrent_benc_value);
 	StringVal* name_ = new StringVal(name_len, name);
 
-	benc_value->Assign(type, new Val(value, TYPE_INT));
+	benc_value->Assign(type, val_mgr->GetInt(value));
 	res_val_benc->Assign(name_, benc_value);
 
 	Unref(name_);
@@ -789,16 +789,16 @@ void BitTorrentTracker_Analyzer::EmitResponse(void)
 	{
 	ProtocolConfirmation();
 
-	val_list* vl = new val_list;
-	vl->append(BuildConnVal());
-	vl->append(new Val(res_status, TYPE_COUNT));
-	vl->append(res_val_headers);
-	vl->append(res_val_peers);
-	vl->append(res_val_benc);
+	if ( bt_tracker_response )
+		ConnectionEventFast(bt_tracker_response, {
+			BuildConnVal(),
+			val_mgr->GetCount(res_status),
+			res_val_headers,
+			res_val_peers,
+			res_val_benc,
+		});
 
 	res_val_headers = 0;
 	res_val_peers = 0;
 	res_val_benc = 0;
-
-	ConnectionEvent(bt_tracker_response, vl);
 	}

@@ -33,7 +33,7 @@ TraversalCode TriggerTraversalCallback::PreExpr(const Expr* expr)
 			trigger->Register(e->Id());
 
 		Val* v = e->Id()->ID_Val();
-		if ( v && v->IsMutableVal() )
+		if ( v && v->Modifiable() )
 			trigger->Register(v);
 		break;
 		};
@@ -42,12 +42,20 @@ TraversalCode TriggerTraversalCallback::PreExpr(const Expr* expr)
 		{
 		const IndexExpr* e = static_cast<const IndexExpr*>(expr);
 		BroObj::SuppressErrors no_errors;
-		Val* v = e->Eval(trigger->frame);
-		if ( v )
+
+		try
 			{
-			trigger->Register(v);
-			Unref(v);
+			Val* v = e->Eval(trigger->frame);
+
+			if ( v )
+				{
+				trigger->Register(v);
+				Unref(v);
+				}
 			}
+		catch ( InterpreterException& )
+			{ /* Already reported */ }
+
 		break;
 		}
 
@@ -132,16 +140,26 @@ Trigger::Trigger(Expr* arg_cond, Stmt* arg_body, Stmt* arg_timeout_stmts,
 		arg_frame->SetDelayed();
 		}
 
-	Val* timeout_val = arg_timeout ? arg_timeout->Eval(arg_frame) : 0;
+	Val* timeout_val = nullptr;
+
+	if ( arg_timeout )
+		{
+		try
+			{
+			timeout_val = arg_timeout->Eval(arg_frame);
+			}
+		catch ( InterpreterException& )
+			{ /* Already reported */ }
+		}
 
 	if ( timeout_val )
 		{
-		Unref(timeout_val);
 		timeout_value = timeout_val->AsInterval();
+		Unref(timeout_val);
 		}
 
 	// Make sure we don't get deleted if somebody calls a method like
-	// Timeout() while evaluating the trigger. 
+	// Timeout() while evaluating the trigger.
 	Ref(this);
 
 	if ( ! Eval() && timeout_value >= 0 )
@@ -202,7 +220,16 @@ bool Trigger::Eval()
 	// constants.
 	Frame* f = frame->Clone();
 	f->SetTrigger(this);
-	Val* v = cond->Eval(f);
+
+	Val* v = nullptr;
+
+	try
+		{
+		v = cond->Eval(f);
+		}
+	catch ( InterpreterException& )
+		{ /* Already reported */ }
+
 	f->ClearTrigger();
 
 	if ( f->HasDelayed() )
@@ -355,38 +382,35 @@ void Trigger::Timeout()
 void Trigger::Register(ID* id)
 	{
 	assert(! disabled);
-	notifiers.Register(id, this);
+	notifier::registry.Register(id, this);
 
 	Ref(id);
-	ids.insert(id);
+	objs.push_back({id, id});
 	}
 
 void Trigger::Register(Val* val)
 	{
+	if ( ! val->Modifiable() )
+		return;
+
 	assert(! disabled);
-	notifiers.Register(val, this);
+	notifier::registry.Register(val->Modifiable(), this);
 
 	Ref(val);
-	vals.insert(val);
+	objs.emplace_back(val, val->Modifiable());
 	}
 
 void Trigger::UnregisterAll()
 	{
-	loop_over_list(ids, i)
+	DBG_LOG(DBG_NOTIFIERS, "%s: unregistering all", Name());
+
+	for ( const auto& o : objs )
 		{
-		notifiers.Unregister(ids[i], this);
-		Unref(ids[i]);
+		notifier::registry.Unregister(o.second, this);
+		Unref(o.first);
 		}
 
-	ids.clear();
-
-	loop_over_list(vals, j)
-		{
-		notifiers.Unregister(vals[j], this);
-		Unref(vals[j]);
-		}
-
-	vals.clear();
+	objs.clear();
 	}
 
 void Trigger::Attach(Trigger *trigger)

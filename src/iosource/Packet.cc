@@ -16,8 +16,8 @@ extern "C" {
 #endif
 }
 
-void Packet::Init(int arg_link_type, pkt_timeval *arg_ts, uint32 arg_caplen,
-		  uint32 arg_len, const u_char *arg_data, int arg_copy,
+void Packet::Init(int arg_link_type, pkt_timeval *arg_ts, uint32_t arg_caplen,
+		  uint32_t arg_len, const u_char *arg_data, int arg_copy,
 		  std::string arg_tag)
 	{
 	if ( data && copy )
@@ -86,8 +86,19 @@ int Packet::GetLinkHeaderSize(int link_type)
 	case DLT_PPP_SERIAL:	// PPP_SERIAL
 		return 4;
 
+	case DLT_IEEE802_11:  // 802.11 monitor
+		return 34;
+
 	case DLT_IEEE802_11_RADIO:	// 802.11 plus RadioTap
 		return 59;
+
+	case DLT_NFLOG:
+		// Linux netlink NETLINK NFLOG socket log messages
+		// The actual header size is variable, but we return the minimum
+		// expected size here, which is 4 bytes for the main header plus at
+		// least 2 bytes each for the type and length values assoicated with
+		// the final TLV carrying the packet payload.
+		return 8;
 
 	case DLT_RAW:
 		return 0;
@@ -137,6 +148,20 @@ void Packet::ProcessLayer2()
 
 	case DLT_EN10MB:
 		{
+		// Skip past Cisco FabricPath to encapsulated ethernet frame.
+		if ( pdata[12] == 0x89 && pdata[13] == 0x03 )
+			{
+			auto constexpr cfplen = 16;
+
+			if ( pdata + cfplen + GetLinkHeaderSize(link_type) >= end_of_data )
+				{
+				Weird("truncated_link_header_cfp");
+				return;
+				}
+
+			pdata += cfplen;
+			}
+
 		// Get protocol being carried from the ethernet frame.
 		int protocol = (pdata[12] << 8) + pdata[13];
 
@@ -146,36 +171,17 @@ void Packet::ProcessLayer2()
 
 		pdata += GetLinkHeaderSize(link_type);
 
-		switch ( protocol )
+		bool saw_vlan = false;
+
+		while ( protocol == 0x8100 || protocol == 0x9100 ||
+				protocol == 0x8864 )
 			{
-			// MPLS carried over the ethernet frame.
-			case 0x8847:
-				have_mpls = true;
-				break;
-
-			// VLAN carried over the ethernet frame.
-			// 802.1q / 802.1ad
-			case 0x8100:
-			case 0x9100:
-				if ( pdata + 4 >= end_of_data )
-					{
-					Weird("truncated_link_header");
-					return;
-					}
-
-				vlan = ((pdata[0] << 8) + pdata[1]) & 0xfff;
-				protocol = ((pdata[2] << 8) + pdata[3]);
-				pdata += 4; // Skip the vlan header
-
-				// Check for MPLS in VLAN.
-				if ( protocol == 0x8847 )
-					{
-					have_mpls = true;
-					break;
-					}
-
-				// Check for double-tagged (802.1ad)
-				if ( protocol == 0x8100 || protocol == 0x9100 )
+			switch ( protocol )
+				{
+				// VLAN carried over the ethernet frame.
+				// 802.1q / 802.1ad
+				case 0x8100:
+				case 0x9100:
 					{
 					if ( pdata + 4 >= end_of_data )
 						{
@@ -183,38 +189,45 @@ void Packet::ProcessLayer2()
 						return;
 						}
 
-					inner_vlan = ((pdata[0] << 8) + pdata[1]) & 0xfff;
+					auto& vlan_ref = saw_vlan ? inner_vlan : vlan;
+					vlan_ref = ((pdata[0] << 8) + pdata[1]) & 0xfff;
 					protocol = ((pdata[2] << 8) + pdata[3]);
 					pdata += 4; // Skip the vlan header
+					saw_vlan = true;
+					eth_type = protocol;
 					}
+					break;
 
-				eth_type = protocol;
-				break;
-
-			// PPPoE carried over the ethernet frame.
-			case 0x8864:
-				if ( pdata + 8 >= end_of_data )
+				// PPPoE carried over the ethernet frame.
+				case 0x8864:
 					{
-					Weird("truncated_link_header");
-					return;
+					if ( pdata + 8 >= end_of_data )
+						{
+						Weird("truncated_link_header");
+						return;
+						}
+
+					protocol = (pdata[6] << 8) + pdata[7];
+					pdata += 8; // Skip the PPPoE session and PPP header
+
+					if ( protocol == 0x0021 )
+						l3_proto = L3_IPV4;
+					else if ( protocol == 0x0057 )
+						l3_proto = L3_IPV6;
+					else
+						{
+						// Neither IPv4 nor IPv6.
+						Weird("non_ip_packet_in_pppoe_encapsulation");
+						return;
+						}
 					}
-
-				protocol = (pdata[6] << 8) + pdata[7];
-				pdata += 8; // Skip the PPPoE session and PPP header
-
-				if ( protocol == 0x0021 )
-					l3_proto = L3_IPV4;
-				else if ( protocol == 0x0057 )
-					l3_proto = L3_IPV6;
-				else
-					{
-					// Neither IPv4 nor IPv6.
-					Weird("non_ip_packet_in_pppoe_encapsulation");
-					return;
-					}
-
-				break;
+					break;
+				}
 			}
+
+		// Check for MPLS in VLAN.
+		if ( protocol == 0x8847 )
+			have_mpls = true;
 
 		// Normal path to determine Layer 3 protocol.
 		if ( ! have_mpls && l3_proto == L3_UNKNOWN )
@@ -279,12 +292,16 @@ void Packet::ProcessLayer2()
 			}
 
 		pdata += rtheader_len;
+		// fallthrough
+		}
 
+	case DLT_IEEE802_11:
+		{
 		u_char len_80211 = 24; // minimal length of data frames
 
 		if ( pdata + len_80211 >= end_of_data )
 			{
-			Weird("truncated_radiotap_header");
+			Weird("truncated_802_11_header");
 			return;
 			}
 
@@ -316,7 +333,7 @@ void Packet::ProcessLayer2()
 
 		if ( pdata + len_80211 >= end_of_data )
 			{
-			Weird("truncated_radiotap_header");
+			Weird("truncated_802_11_header");
 			return;
 			}
 
@@ -349,7 +366,7 @@ void Packet::ProcessLayer2()
 
 		if ( pdata + 8 >= end_of_data )
 			{
-			Weird("truncated_radiotap_header");
+			Weird("truncated_802_11_header");
 			return;
 			}
 		// Check that the DSAP and SSAP are both SNAP and that the control
@@ -374,12 +391,93 @@ void Packet::ProcessLayer2()
 			l3_proto = L3_IPV4;
 		else if ( protocol == 0x86DD )
 			l3_proto = L3_IPV6;
+		else if ( protocol == 0x0806 || protocol == 0x8035 )
+			l3_proto = L3_ARP;
 		else
 			{
-			Weird("non_ip_packet_in_ieee802_11_radio_encapsulation");
+			Weird("non_ip_packet_in_ieee802_11");
 			return;
 			}
 		pdata += 2;
+
+		break;
+		}
+
+	case DLT_NFLOG:
+		{
+		// See https://www.tcpdump.org/linktypes/LINKTYPE_NFLOG.html
+
+		uint8_t protocol = pdata[0];
+
+		if ( protocol == AF_INET )
+			l3_proto = L3_IPV4;
+		else if ( protocol == AF_INET6 )
+			l3_proto = L3_IPV6;
+		else
+			{
+			Weird("non_ip_in_nflog");
+			return;
+			}
+
+		uint8_t version = pdata[1];
+
+		if ( version != 0 )
+			{
+			Weird("unknown_nflog_version");
+			return;
+			}
+
+		// Skip to TLVs.
+		pdata += 4;
+
+		uint16_t tlv_len;
+		uint16_t tlv_type;
+
+		while ( true )
+			{
+			if ( pdata + 4 >= end_of_data )
+				{
+				Weird("nflog_no_pcap_payload");
+				return;
+				}
+
+			// TLV Type and Length values are specified in host byte order
+			// (libpcap should have done any needed byteswapping already).
+
+			tlv_len = *(reinterpret_cast<const uint16_t*>(pdata));
+			tlv_type = *(reinterpret_cast<const uint16_t*>(pdata + 2));
+
+			auto constexpr nflog_type_payload = 9;
+
+			if ( tlv_type == nflog_type_payload )
+				{
+				// The raw packet payload follows this TLV.
+				pdata += 4;
+				break;
+				}
+			else
+				{
+				// The Length value includes the 4 octets for the Type and
+				// Length values, but TLVs are also implicitly padded to
+				// 32-bit alignments (that padding may not be included in
+				// the Length value).
+
+				if ( tlv_len < 4 )
+					{
+					Weird("nflog_bad_tlv_len");
+					return;
+					}
+				else
+					{
+					auto rem = tlv_len % 4;
+
+					if ( rem != 0 )
+						tlv_len += 4 - rem;
+					}
+
+				pdata += tlv_len;
+				}
+			}
 
 		break;
 		}
@@ -515,29 +613,29 @@ RecordVal* Packet::BuildPktHdrVal() const
 		{
 		// Ethernet header layout is:
 		//    dst[6bytes] src[6bytes] ethertype[2bytes]...
-		l2_hdr->Assign(0, new EnumVal(BifEnum::LINK_ETHERNET, BifType::Enum::link_encap));
+		l2_hdr->Assign(0, BifType::Enum::link_encap->GetVal(BifEnum::LINK_ETHERNET));
 		l2_hdr->Assign(3, FmtEUI48(data + 6));	// src
 		l2_hdr->Assign(4, FmtEUI48(data));  	// dst
 
 		if ( vlan )
-			l2_hdr->Assign(5, new Val(vlan, TYPE_COUNT));
+			l2_hdr->Assign(5, val_mgr->GetCount(vlan));
 
 		if ( inner_vlan )
-			l2_hdr->Assign(6, new Val(inner_vlan, TYPE_COUNT));
+			l2_hdr->Assign(6, val_mgr->GetCount(inner_vlan));
 
-		l2_hdr->Assign(7, new Val(eth_type, TYPE_COUNT));
+		l2_hdr->Assign(7, val_mgr->GetCount(eth_type));
 
 		if ( eth_type == ETHERTYPE_ARP || eth_type == ETHERTYPE_REVARP )
 			// We also identify ARP for L3 over ethernet
 			l3 = BifEnum::L3_ARP;
 		}
 	else
-		l2_hdr->Assign(0, new EnumVal(BifEnum::LINK_UNKNOWN, BifType::Enum::link_encap));
+		l2_hdr->Assign(0, BifType::Enum::link_encap->GetVal(BifEnum::LINK_UNKNOWN));
 
-	l2_hdr->Assign(1, new Val(len, TYPE_COUNT));
-	l2_hdr->Assign(2, new Val(cap_len, TYPE_COUNT));
+	l2_hdr->Assign(1, val_mgr->GetCount(len));
+	l2_hdr->Assign(2, val_mgr->GetCount(cap_len));
 
-	l2_hdr->Assign(8, new EnumVal(l3, BifType::Enum::layer3_proto));
+	l2_hdr->Assign(8, BifType::Enum::layer3_proto->GetVal(l3));
 
 	pkt_hdr->Assign(0, l2_hdr);
 
@@ -573,66 +671,3 @@ void Packet::Describe(ODesc* d) const
 	d->Add(ip.DstAddr());
 	}
 
-bool Packet::Serialize(SerialInfo* info) const
-	{
-	return SERIALIZE(uint32(ts.tv_sec)) &&
-		SERIALIZE(uint32(ts.tv_usec)) &&
-		SERIALIZE(uint32(len)) &&
-		SERIALIZE(link_type) &&
-		info->s->Write(tag.c_str(), tag.length(), "tag") &&
-		info->s->Write((const char*)data, cap_len, "data");
-	}
-
-#ifdef DEBUG
-static iosource::PktDumper* dump = 0;
-#endif
-
-Packet* Packet::Unserialize(UnserialInfo* info)
-	{
-	pkt_timeval ts;
-	uint32 len, link_type;
-
-	if ( ! (UNSERIALIZE((uint32 *)&ts.tv_sec) &&
-		UNSERIALIZE((uint32 *)&ts.tv_usec) &&
-		UNSERIALIZE(&len) &&
-		UNSERIALIZE(&link_type)) )
-		return 0;
-
-	char* tag;
-	if ( ! info->s->Read((char**) &tag, 0, "tag") )
-		return 0;
-
-	const u_char* pkt;
-	int caplen;
-	if ( ! info->s->Read((char**) &pkt, &caplen, "data") )
-		{
-		delete [] tag;
-		return 0;
-		}
-
-	Packet *p = new Packet(link_type, &ts, caplen, len, pkt, true,
-			       std::string(tag));
-	delete [] tag;
-
-	// For the global timer manager, we take the global network_time as the
-	// packet's timestamp for feeding it into our packet loop.
-	if ( p->tag == "" )
-		p->time = timer_mgr->Time();
-	else
-		p->time = p->ts.tv_sec + double(p->ts.tv_usec) / 1e6;
-
-#ifdef DEBUG
-	if ( debug_logger.IsEnabled(DBG_TM) )
-		{
-		if ( ! dump )
-			dump = iosource_mgr->OpenPktDumper("tm.pcap", true);
-
-		if ( dump )
-			{
-			dump->Dump(p);
-			}
-		}
-#endif
-
-	return p;
-	}

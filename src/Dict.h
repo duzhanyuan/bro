@@ -10,13 +10,6 @@ class Dictionary;
 class DictEntry;
 class IterCookie;
 
-declare(PList,DictEntry);
-declare(PList,IterCookie);
-
-// Default number of hash buckets in dictionary.  The dictionary will
-// increase the size of the hash table as needed.
-#define DEFAULT_DICT_SIZE 16
-
 // Type indicating whether the dictionary should keep track of the order
 // of insertions.
 typedef enum { ORDERED, UNORDERED } dict_order;
@@ -29,8 +22,8 @@ extern void generic_delete_func(void*);
 
 class Dictionary {
 public:
-	Dictionary(dict_order ordering = UNORDERED,
-			int initial_size = DEFAULT_DICT_SIZE);
+	explicit Dictionary(dict_order ordering = UNORDERED,
+			int initial_size = 0);
 	virtual ~Dictionary();
 
 	// Member functions for looking up a key, inserting/changing its
@@ -72,7 +65,7 @@ public:
 		}
 
 	// Total number of entries ever.
-	uint64 NumCumulativeInserts() const
+	uint64_t NumCumulativeInserts() const
 		{
 		return cumulative_entries;
 		}
@@ -109,8 +102,6 @@ public:
 	// which should be delete'd when no longer needed.
 	IterCookie* InitForIteration() const;
 	void* NextEntry(HashKey*& h, IterCookie*& cookie, int return_hash) const;
-	void* NextEntry(const void*& key, int& key_len, IterCookie*& cookie)
-		const;
 	void StopIteration(IterCookie* cookie) const;
 
 	void SetDeleteFunc(dict_delete_func f)		{ delete_func = f; }
@@ -122,7 +113,7 @@ public:
 	// removed. (We don't get this for free, so only use it if
 	// necessary.)
 	void MakeRobustCookie(IterCookie* cookie)
-		{ cookies.append(cookie); }
+		{ cookies.push_back(cookie); }
 
 	// Remove all entries.
 	void Clear();
@@ -138,13 +129,13 @@ private:
 	void* Insert(DictEntry* entry, int copy_key);
 
 	void* DoRemove(DictEntry* entry, hash_t h,
-			PList(DictEntry)* chain, int chain_offset);
+			PList<DictEntry>* chain, int chain_offset);
 
 	int NextPrime(int n) const;
 	int IsPrime(int n) const;
 	void StartChangeSize(int new_size);
-	void FinishChangeSize(void);
-	void MoveChains(void);
+	void FinishChangeSize();
+	void MoveChains();
 
 	// The following get and set the "density" threshold - if the
 	// average hash chain length exceeds this threshold, the
@@ -168,16 +159,16 @@ private:
 	// When we're resizing, we'll have tbl (old) and tbl2 (new)
 	// tbl_next_ind keeps track of how much we've moved to tbl2
 	// (it's the next index we're going to move).
-	PList(DictEntry)** tbl;
+	PList<DictEntry>** tbl;
 	int num_buckets;
 	int num_entries;
 	int max_num_entries;
-	uint64 cumulative_entries;
+	uint64_t cumulative_entries;
 	double den_thresh;
 	int thresh_entries;
 
 	// Resizing table (replicates tbl above).
-	PList(DictEntry)** tbl2;
+	PList<DictEntry>** tbl2;
 	int num_buckets2;
 	int num_entries2;
 	int max_num_entries2;
@@ -186,52 +177,47 @@ private:
 
 	hash_t tbl_next_ind;
 
-	PList(DictEntry)* order;
+	PList<DictEntry>* order;
 	dict_delete_func delete_func;
 
-	PList(IterCookie) cookies;
+	PList<IterCookie> cookies;
 };
 
-
-#define PDict(type) type ## PDict
-#define PDictdeclare(type)	\
-class PDict(type) : public Dictionary {	\
-public:	\
-	PDict(type)(dict_order ordering = UNORDERED,	\
-			int initial_size = DEFAULT_DICT_SIZE) :	\
-		Dictionary(ordering, initial_size) {}	\
-	type* Lookup(const char* key) const	\
-		{	\
-		HashKey h(key);	\
-		return (type*) Dictionary::Lookup(&h);	\
-		}	\
-	type* Lookup(const HashKey* key) const	\
-		{ return (type*) Dictionary::Lookup(key); }	\
-	type* Insert(const char* key, type* val)	\
-		{	\
-		HashKey h(key);	\
-		return (type*) Dictionary::Insert(&h, (void*) val);	\
-		}	\
-	type* Insert(HashKey* key, type* val)	\
-		{ return (type*) Dictionary::Insert(key, (void*) val); }\
-	type* NthEntry(int n) const	\
-		{ return (type*) Dictionary::NthEntry(n); }	\
-	type* NthEntry(int n, const char*& key) const	\
-		{	\
-		int key_len;	\
-		return (type*) Dictionary::NthEntry(n, (const void*&) key,\
-							key_len);	\
-		}	\
-	type* NextEntry(IterCookie*& cookie) const	\
-		{	\
-		HashKey* h; \
-		return (type*) Dictionary::NextEntry(h, cookie, 0);	\
-		} \
-	type* NextEntry(HashKey*& h, IterCookie*& cookie) const	\
-		{ return (type*) Dictionary::NextEntry(h, cookie, 1); } \
-	type* RemoveEntry(const HashKey* key)	\
-		{ return (type*) Remove(key->Key(), key->Size(),	\
-					key->Hash()); } \
-}
+template<typename T>
+class PDict : public Dictionary {
+public:
+	explicit PDict(dict_order ordering = UNORDERED, int initial_size = 0) :
+		Dictionary(ordering, initial_size) {}
+	T* Lookup(const char* key) const
+		{
+		HashKey h(key);
+		return (T*) Dictionary::Lookup(&h);
+		}
+	T* Lookup(const HashKey* key) const
+		{ return (T*) Dictionary::Lookup(key); }
+	T* Insert(const char* key, T* val)
+		{
+		HashKey h(key);
+		return (T*) Dictionary::Insert(&h, (void*) val);
+		}
+	T* Insert(HashKey* key, T* val)
+		{ return (T*) Dictionary::Insert(key, (void*) val); }
+	T* NthEntry(int n) const
+		{ return (T*) Dictionary::NthEntry(n); }
+	T* NthEntry(int n, const char*& key) const
+		{
+		int key_len;
+		return (T*) Dictionary::NthEntry(n, (const void*&) key, key_len);
+		}
+	T* NextEntry(IterCookie*& cookie) const
+		{
+		HashKey* h;
+		return (T*) Dictionary::NextEntry(h, cookie, 0);
+		}
+	T* NextEntry(HashKey*& h, IterCookie*& cookie) const
+		{ return (T*) Dictionary::NextEntry(h, cookie, 1); }
+	T* RemoveEntry(const HashKey* key)
+		{ return (T*) Remove(key->Key(), key->Size(), key->Hash()); }
+};
 
 #endif

@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -42,7 +42,7 @@ HTTP_Entity::HTTP_Entity(HTTP_Message *arg_message, MIME_Entity* parent_entity, 
 	http_message = arg_message;
 	expect_body = arg_expect_body;
 	chunked_transfer_state = NON_CHUNKED_TRANSFER;
-	content_length = -1;	// unspecified
+	content_length = range_length = -1;	// unspecified
 	expect_data_length = 0;
 	body_length = 0;
 	header_length = 0;
@@ -53,6 +53,9 @@ HTTP_Entity::HTTP_Entity(HTTP_Message *arg_message, MIME_Entity* parent_entity, 
 	offset = 0;
 	instance_length = -1; // unspecified
 	send_size = true;
+	// Always override what MIME_Entity set for want_all_headers: HTTP doesn't
+	// raise the generic MIME events, but rather it's own specific ones.
+	want_all_headers = (bool)http_all_headers;
 	}
 
 void HTTP_Entity::EndOfData()
@@ -357,21 +360,33 @@ void HTTP_Entity::SetPlainDelivery(int64_t length)
 
 void HTTP_Entity::SubmitHeader(mime::MIME_Header* h)
 	{
-	if ( mime::strcasecmp_n(h->get_name(), "content-length") == 0 )
+	if ( mime::istrequal(h->get_name(), "content-length") )
 		{
 		data_chunk_t vt = h->get_value_token();
 		if ( ! mime::is_null_data_chunk(vt) )
 			{
 			int64_t n;
 			if ( atoi_n(vt.length, vt.data, 0, 10, n) )
+				{
 				content_length = n;
+
+				if ( is_partial_content && range_length != content_length )
+					{
+					// Possible evasion attempt.
+					http_message->Weird("HTTP_range_not_matching_len");
+
+					// Take the maximum of both lengths to avoid evasions.
+					if ( range_length > content_length )
+						content_length = range_length;
+					}
+				}
 			else
 				content_length = 0;
 			}
 		}
 
 	// Figure out content-length for HTTP 206 Partial Content response
-	else if ( mime::strcasecmp_n(h->get_name(), "content-range") == 0 &&
+	else if ( mime::istrequal(h->get_name(), "content-range") &&
 		      http_message->MyHTTP_Analyzer()->HTTP_ReplyCode() == 206 )
 		{
 		data_chunk_t vt = h->get_value_token();
@@ -432,7 +447,22 @@ void HTTP_Entity::SubmitHeader(mime::MIME_Header* h)
 
 			is_partial_content = true;
 			offset = f;
-			content_length = len;
+			range_length = len;
+
+			if ( content_length > 0 )
+				{
+				if ( content_length != range_length )
+					{
+					// Possible evasion attempt.
+					http_message->Weird("HTTP_range_not_matching_len");
+
+					// Take the maximum of both lengths to avoid evasions.
+					if ( range_length > content_length )
+						content_length = range_length;
+					}
+				}
+			else
+				content_length = range_length;
 			}
 		else
 			{
@@ -441,19 +471,25 @@ void HTTP_Entity::SubmitHeader(mime::MIME_Header* h)
 			}
 		}
 
-	else if ( mime::strcasecmp_n(h->get_name(), "transfer-encoding") == 0 )
+	else if ( mime::istrequal(h->get_name(), "transfer-encoding") )
 		{
+		double http_version = 0;
+		if (http_message->analyzer->GetRequestOngoing())
+			http_version = http_message->analyzer->GetRequestVersion();
+		else // reply_ongoing
+			http_version = http_message->analyzer->GetReplyVersion();
+
 		data_chunk_t vt = h->get_value_token();
-		if ( mime::strcasecmp_n(vt, "chunked") == 0 )
+		if ( mime::istrequal(vt, "chunked") && http_version == 1.1 )
 			chunked_transfer_state = BEFORE_CHUNK;
 		}
 
-	else if ( mime::strcasecmp_n(h->get_name(), "content-encoding") == 0 )
+	else if ( mime::istrequal(h->get_name(), "content-encoding") )
 		{
 		data_chunk_t vt = h->get_value_token();
-		if ( mime::strcasecmp_n(vt, "gzip") == 0 )
+		if ( mime::istrequal(vt, "gzip") || mime::istrequal(vt, "x-gzip") )
 			encoding = GZIP;
-		if ( mime::strcasecmp_n(vt, "deflate") == 0 )
+		if ( mime::istrequal(vt, "deflate") )
 			encoding = DEFLATE;
 		}
 
@@ -581,11 +617,11 @@ Val* HTTP_Message::BuildMessageStat(const int interrupted, const char* msg)
 	RecordVal* stat = new RecordVal(http_message_stat);
 	int field = 0;
 	stat->Assign(field++, new Val(start_time, TYPE_TIME));
-	stat->Assign(field++, new Val(interrupted, TYPE_BOOL));
+	stat->Assign(field++, val_mgr->GetBool(interrupted));
 	stat->Assign(field++, new StringVal(msg));
-	stat->Assign(field++, new Val(body_length, TYPE_COUNT));
-	stat->Assign(field++, new Val(content_gap_length, TYPE_COUNT));
-	stat->Assign(field++, new Val(header_length, TYPE_COUNT));
+	stat->Assign(field++, val_mgr->GetCount(body_length));
+	stat->Assign(field++, val_mgr->GetCount(content_gap_length));
+	stat->Assign(field++, val_mgr->GetCount(header_length));
 	return stat;
 	}
 
@@ -613,11 +649,11 @@ void HTTP_Message::Done(const int interrupted, const char* detail)
 
 	if ( http_message_done )
 		{
-		val_list* vl = new val_list;
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		vl->append(BuildMessageStat(interrupted, detail));
-		GetAnalyzer()->ConnectionEvent(http_message_done, vl);
+		GetAnalyzer()->ConnectionEventFast(http_message_done, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+			BuildMessageStat(interrupted, detail),
+		});
 		}
 
 	MyHTTP_Analyzer()->HTTP_MessageDone(is_orig, this);
@@ -646,10 +682,10 @@ void HTTP_Message::BeginEntity(mime::MIME_Entity* entity)
 
 	if ( http_begin_entity )
 		{
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		analyzer->ConnectionEvent(http_begin_entity, vl);
+		analyzer->ConnectionEventFast(http_begin_entity, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+		});
 		}
 	}
 
@@ -663,10 +699,10 @@ void HTTP_Message::EndEntity(mime::MIME_Entity* entity)
 
 	if ( http_end_entity )
 		{
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		analyzer->ConnectionEvent(http_end_entity, vl);
+		analyzer->ConnectionEventFast(http_end_entity, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+		});
 		}
 
 	current_entity = (HTTP_Entity*) entity->Parent();
@@ -704,11 +740,11 @@ void HTTP_Message::SubmitAllHeaders(mime::MIME_HeaderList& hlist)
 	{
 	if ( http_all_headers )
 		{
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		vl->append(BuildHeaderTable(hlist));
-		analyzer->ConnectionEvent(http_all_headers, vl);
+		analyzer->ConnectionEventFast(http_all_headers, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+			BuildHeaderTable(hlist),
+		});
 		}
 
 	if ( http_content_type )
@@ -718,18 +754,21 @@ void HTTP_Message::SubmitAllHeaders(mime::MIME_HeaderList& hlist)
 		ty->Ref();
 		subty->Ref();
 
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		vl->append(ty);
-		vl->append(subty);
-		analyzer->ConnectionEvent(http_content_type, vl);
+		analyzer->ConnectionEventFast(http_content_type, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+			ty,
+			subty,
+		});
 		}
 	}
 
 void HTTP_Message::SubmitTrailingHeaders(mime::MIME_HeaderList& /* hlist */)
 	{
-	// Do nothing for now.
+	// Do nothing for now.  Note that if this ever changes do something
+	// which relies on the header list argument, that's currently not
+	// populated unless the http_all_headers or mime_all_headers events
+	// are being used (so you may need to change that, too).
 	}
 
 void HTTP_Message::SubmitData(int len, const char* buf)
@@ -822,6 +861,9 @@ HTTP_Analyzer::HTTP_Analyzer(Connection* conn)
 
 	connect_request = false;
 	pia = 0;
+	upgraded = false;
+	upgrade_connection = false;
+	upgrade_protocol.clear();
 
 	content_line_orig = new tcp::ContentLine_Analyzer(conn, true);
 	AddSupportAnalyzer(content_line_orig);
@@ -877,6 +919,9 @@ void HTTP_Analyzer::DeliverStream(int len, const u_char* data, bool is_orig)
 	tcp::TCP_ApplicationAnalyzer::DeliverStream(len, data, is_orig);
 
 	if ( TCP() && TCP()->IsPartial() )
+		return;
+
+	if ( upgraded )
 		return;
 
 	if ( pia )
@@ -1052,7 +1097,7 @@ void HTTP_Analyzer::DeliverStream(int len, const u_char* data, bool is_orig)
 		}
 	}
 
-void HTTP_Analyzer::Undelivered(uint64 seq, int len, bool is_orig)
+void HTTP_Analyzer::Undelivered(uint64_t seq, int len, bool is_orig)
 	{
 	tcp::TCP_ApplicationAnalyzer::Undelivered(seq, len, is_orig);
 
@@ -1138,17 +1183,13 @@ void HTTP_Analyzer::GenStats()
 	if ( http_stats )
 		{
 		RecordVal* r = new RecordVal(http_stats_rec);
-		r->Assign(0, new Val(num_requests, TYPE_COUNT));
-		r->Assign(1, new Val(num_replies, TYPE_COUNT));
+		r->Assign(0, val_mgr->GetCount(num_requests));
+		r->Assign(1, val_mgr->GetCount(num_replies));
 		r->Assign(2, new Val(request_version, TYPE_DOUBLE));
 		r->Assign(3, new Val(reply_version, TYPE_DOUBLE));
 
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(r);
-
 		// DEBUG_MSG("%.6f http_stats\n", network_time);
-		ConnectionEvent(http_stats, vl);
+		ConnectionEventFast(http_stats, {BuildConnVal(), r});
 		}
 	}
 
@@ -1345,13 +1386,12 @@ void HTTP_Analyzer::HTTP_Event(const char* category, StringVal* detail)
 	{
 	if ( http_event )
 		{
-		val_list* vl = new val_list();
-		vl->append(BuildConnVal());
-		vl->append(new StringVal(category));
-		vl->append(detail);
-
 		// DEBUG_MSG("%.6f http_event\n", network_time);
-		ConnectionEvent(http_event, vl);
+		ConnectionEventFast(http_event, {
+			BuildConnVal(),
+			new StringVal(category),
+			detail,
+		});
 		}
 	else
 		delete detail;
@@ -1387,17 +1427,16 @@ void HTTP_Analyzer::HTTP_Request()
 
 	if ( http_request )
 		{
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-
 		Ref(request_method);
-		vl->append(request_method);
-		vl->append(TruncateURI(request_URI->AsStringVal()));
-		vl->append(TruncateURI(unescaped_URI->AsStringVal()));
 
-		vl->append(new StringVal(fmt("%.1f", request_version)));
 		// DEBUG_MSG("%.6f http_request\n", network_time);
-		ConnectionEvent(http_request, vl);
+		ConnectionEventFast(http_request, {
+			BuildConnVal(),
+			request_method,
+			TruncateURI(request_URI->AsStringVal()),
+			TruncateURI(unescaped_URI->AsStringVal()),
+			new StringVal(fmt("%.1f", request_version)),
+		});
 		}
 	}
 
@@ -1405,15 +1444,14 @@ void HTTP_Analyzer::HTTP_Reply()
 	{
 	if ( http_reply )
 		{
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(new StringVal(fmt("%.1f", reply_version)));
-		vl->append(new Val(reply_code, TYPE_COUNT));
-		if ( reply_reason_phrase )
-			vl->append(reply_reason_phrase->Ref());
-		else
-			vl->append(new StringVal("<empty>"));
-		ConnectionEvent(http_reply, vl);
+		ConnectionEventFast(http_reply, {
+			BuildConnVal(),
+			new StringVal(fmt("%.1f", reply_version)),
+			val_mgr->GetCount(reply_code),
+			reply_reason_phrase ?
+				reply_reason_phrase->Ref() :
+				new StringVal("<empty>"),
+		});
 		}
 	else
 		{
@@ -1468,15 +1506,35 @@ void HTTP_Analyzer::ReplyMade(const int interrupted, const char* msg)
 		unanswered_requests.pop();
 		}
 
-	reply_code = 0;
-
 	if ( reply_reason_phrase )
 		{
 		Unref(reply_reason_phrase);
 		reply_reason_phrase = 0;
 		}
 
-	if ( interrupted )
+	// unanswered requests = 1 because there is no pop after 101.
+	if ( reply_code == 101 && unanswered_requests.size() == 1 && upgrade_connection &&
+	     upgrade_protocol.size() )
+		{
+		// Upgraded connection that switches immediately - e.g. websocket.
+		upgraded = true;
+		RemoveSupportAnalyzer(content_line_orig);
+		RemoveSupportAnalyzer(content_line_resp);
+
+		if ( http_connection_upgrade )
+			{
+			ConnectionEventFast(http_connection_upgrade, {
+				BuildConnVal(),
+				new StringVal(upgrade_protocol),
+			});
+			}
+		}
+
+	reply_code = 0;
+	upgrade_connection = false;
+	upgrade_protocol.clear();
+
+	if ( interrupted || upgraded )
 		reply_state = EXPECT_REPLY_NOTHING;
 	else
 		reply_state = EXPECT_REPLY_LINE;
@@ -1588,33 +1646,28 @@ int HTTP_Analyzer::ExpectReplyMessageBody()
 
 void HTTP_Analyzer::HTTP_Header(int is_orig, mime::MIME_Header* h)
 	{
-#if 0
-	// ### Only call ParseVersion if we're tracking versions:
-	if ( strcasecmp_n(h->get_name(), "server") == 0 )
-		ParseVersion(h->get_value(),
-				(is_orig ? Conn()->OrigAddr() : Conn()->RespAddr()), false);
-
-	else if ( strcasecmp_n(h->get_name(), "user-agent") == 0 )
-		ParseVersion(h->get_value(),
-				(is_orig ? Conn()->OrigAddr() : Conn()->RespAddr()), true);
-#endif
-
 	// To be "liberal", we only look at "keep-alive" on the client
 	// side, and if seen assume the connection to be persistent.
 	// This seems fairly safe - at worst, the client does indeed
 	// send additional requests, and the server ignores them.
-	if ( is_orig && mime::strcasecmp_n(h->get_name(), "connection") == 0 )
+	if ( is_orig && mime::istrequal(h->get_name(), "connection") )
 		{
-		if ( mime::strcasecmp_n(h->get_value_token(), "keep-alive") == 0 )
+		if ( mime::istrequal(h->get_value_token(), "keep-alive") )
 			keep_alive = 1;
 		}
 
 	if ( ! is_orig &&
-	     mime::strcasecmp_n(h->get_name(), "connection") == 0 )
-	        {
-		if ( mime::strcasecmp_n(h->get_value_token(), "close") == 0 )
-		        connection_close = 1;
+	     mime::istrequal(h->get_name(), "connection") )
+		{
+		if ( mime::istrequal(h->get_value_token(), "close") )
+			connection_close = 1;
+		else if ( mime::istrequal(h->get_value_token(), "upgrade") )
+			upgrade_connection = true;
 		}
+
+	if ( ! is_orig &&
+	     mime::istrequal(h->get_name(), "upgrade") )
+	     upgrade_protocol.assign(h->get_value_token().data, h->get_value_token().length);
 
 	if ( http_header )
 		{
@@ -1632,135 +1685,15 @@ void HTTP_Analyzer::HTTP_Header(int is_orig, mime::MIME_Header* h)
 		Conn()->Match(rule, (const u_char*) hd_value.data, hd_value.length,
 				is_orig, false, true, false);
 
-		val_list* vl = new val_list();
-		vl->append(BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		vl->append(mime::new_string_val(h->get_name())->ToUpper());
-		vl->append(mime::new_string_val(h->get_value()));
 		if ( DEBUG_http )
 			DEBUG_MSG("%.6f http_header\n", network_time);
-		ConnectionEvent(http_header, vl);
-		}
-	}
 
-void HTTP_Analyzer::ParseVersion(data_chunk_t ver, const IPAddr& host,
-				bool user_agent)
-	{
-	int len = ver.length;
-	const char* data = ver.data;
-
-	if ( software_unparsed_version_found )
-		Conn()->UnparsedVersionFoundEvent(host, data, len, this);
-
-	// The RFC defines:
-	//
-	//	product		= token ["/" product-version]
-	//	product-version = token
-	//	Server		= "Server" ":" 1*( product | comment )
-
-	int offset;
-	data_chunk_t product, product_version;
-	int num_version = 0;
-
-	while ( len > 0 )
-		{
-		// Skip white space.
-		while ( len && mime::is_lws(*data) )
-			{
-			++data;
-			--len;
-			}
-
-		// See if a comment is coming next. For User-Agent,
-		// we parse it, too.
-		if ( user_agent && len && *data == '(' )
-			{
-			// Find end of comment.
-			const char* data_start = data;
-			const char* eoc =
-				data + mime::MIME_skip_lws_comments(len, data);
-
-			// Split into parts.
-			// (This may get confused by nested comments,
-			// but we ignore this for now.)
-			const char* eot;
-			++data;
-			while ( 1 )
-				{
-				// Eat spaces.
-				while ( data < eoc && mime::is_lws(*data) )
-					++data;
-
-				// Find end of token.
-				for ( eot = data;
-				      eot < eoc && *eot != ';' && *eot != ')';
-				      ++eot )
-					;
-
-				if ( eot == eoc )
-					break;
-
-				// Delete spaces at end of token.
-				for ( ; eot > data && mime::is_lws(*(eot-1)); --eot )
-					;
-
-				if ( data != eot && software_version_found )
-					Conn()->VersionFoundEvent(host, data, eot - data, this);
-				data = eot + 1;
-				}
-
-			len -= eoc - data_start;
-			data = eoc;
-			continue;
-			}
-
-		offset = mime::MIME_get_slash_token_pair(len, data,
-						&product, &product_version);
-		if ( offset < 0 )
-			{
-			// I guess version detection is best-effort,
-			// so we do not complain in the final version
-			if ( num_version == 0 )
-				HTTP_Event("bad_HTTP_version",
-						mime::new_string_val(len, data));
-
-			// Try to simply skip next token.
-			offset = mime::MIME_get_token(len, data, &product);
-			if ( offset < 0 )
-				break;
-
-			len -= offset;
-			data += offset;
-			}
-
-		else
-			{
-			len -= offset;
-			data += offset;
-
-			int version_len =
-				product.length + 1 + product_version.length;
-
-			char* version_str = new char[version_len+1];
-			char* s = version_str;
-
-			memcpy(s, product.data, product.length);
-
-			s += product.length;
-			*(s++) = '/';
-
-			memcpy(s, product_version.data, product_version.length);
-
-			s += product_version.length;
-			*s = 0;
-
-			if ( software_version_found )
-				Conn()->VersionFoundEvent(host,	version_str,
-							version_len, this);
-
-			delete [] version_str;
-			++num_version;
-			}
+		ConnectionEventFast(http_header, {
+			BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+			mime::new_string_val(h->get_name())->ToUpper(),
+			mime::new_string_val(h->get_value()),
+		});
 		}
 	}
 
@@ -1768,12 +1701,12 @@ void HTTP_Analyzer::HTTP_EntityData(int is_orig, BroString* entity_data)
 	{
 	if ( http_entity_data )
 		{
-		val_list* vl = new val_list();
-		vl->append(BuildConnVal());
-		vl->append(new Val(is_orig, TYPE_BOOL));
-		vl->append(new Val(entity_data->Len(), TYPE_COUNT));
-		vl->append(new StringVal(entity_data));
-		ConnectionEvent(http_entity_data, vl);
+		ConnectionEventFast(http_entity_data, {
+			BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+			val_mgr->GetCount(entity_data->Len()),
+			new StringVal(entity_data),
+		});
 		}
 	else
 		delete entity_data;
@@ -1843,10 +1776,20 @@ BroString* analyzer::http::unescape_URI(const u_char* line, const u_char* line_e
 
 			if ( line == line_end )
 				{
-				// How to deal with % at end of line?
-				// *URI_p++ = '%';
+				*URI_p++ = '%';
 				if ( analyzer )
 					analyzer->Weird("illegal_%_at_end_of_URI");
+				break;
+				}
+
+			else if ( line + 1 == line_end )
+				{
+				// % + one character at end of line. Log weird
+				// and just add to unescpaped URI.
+				*URI_p++ = '%';
+				*URI_p++ = *line;
+				if ( analyzer )
+					analyzer->Weird("partial_escape_at_end_of_URI");
 				break;
 				}
 

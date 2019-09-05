@@ -5,6 +5,7 @@
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <string.h>
 #include <string>
 
 #include "BroString.h"
@@ -17,6 +18,31 @@ struct ConnID;
 namespace analyzer { class ExpectedConn; }
 
 typedef in_addr in4_addr;
+
+struct ConnIDKey
+	{
+	in6_addr ip1;
+	in6_addr ip2;
+	uint16_t port1;
+	uint16_t port2;
+
+	ConnIDKey() : port1(0), port2(0)
+		{
+		memset(&ip1, 0, sizeof(in6_addr));
+		memset(&ip2, 0, sizeof(in6_addr));
+		}
+
+	bool operator<(const ConnIDKey& rhs) const { return memcmp(this, &rhs, sizeof(ConnIDKey)) < 0; }
+	bool operator==(const ConnIDKey& rhs) const { return memcmp(this, &rhs, sizeof(ConnIDKey)) == 0; }
+
+	ConnIDKey& operator=(const ConnIDKey& rhs)
+		{
+		if ( this != &rhs )
+			memcpy(this, &rhs, sizeof(ConnIDKey));
+
+		return *this;
+		}
+	};
 
 /**
  * Class storing both IPv4 and IPv6 addresses.
@@ -68,7 +94,7 @@ public:
 	 */
 	IPAddr(const std::string& s)
 		{
-		Init(s);
+		Init(s.data());
 		}
 
 	/**
@@ -88,7 +114,7 @@ public:
 	 * @param s String containing an IP address as either a dotted IPv4
 	 * address or a hex IPv6 address.
 	 */
-	IPAddr(const BroString& s)
+	explicit IPAddr(const BroString& s)
 		{
 		Init(s.CheckString());
 		}
@@ -362,9 +388,57 @@ public:
 	  */
 	void ConvertToThreadingValue(threading::Value::addr_t* v) const;
 
-	friend HashKey* BuildConnIDHashKey(const ConnID& id);
+	friend ConnIDKey BuildConnIDKey(const ConnID& id);
 
 	unsigned int MemoryAllocation() const { return padded_sizeof(*this); }
+
+	/**
+	 * Check if an IP prefix length would be valid against this IP address.
+	 *
+	 * @param length the IP prefix length to check
+	 *
+	 * @param len_is_v6_relative whether the length is relative to the full
+	 * IPv6 address length (e.g. since IPv4 addrs are internally stored
+	 * in v4-to-v6-mapped format, this parameter disambiguates whether
+	 * a the length is in the usual 32-bit space for IPv4 or the full
+	 * 128-bit space of IPv6 address.
+	 *
+	 * @return whether the prefix length is valid.
+	 */
+	bool CheckPrefixLength(uint8_t length, bool len_is_v6_relative = false) const;
+
+	/**
+	 * Converts an IPv4 or IPv6 string into a network address structure
+	 * (IPv6 or v4-to-v6-mapping in network bytes order).
+	 *
+	 * @param s the IPv4 or IPv6 string to convert (ASCII, NUL-terminated).
+	 *
+	 * @param result buffer that the caller supplies to store the result.
+	 *
+	 * @return whether the conversion was successful.
+	 */
+	static bool ConvertString(const char* s, in6_addr* result);
+
+	/**
+	 * @param s the IPv4 or IPv6 string to convert (ASCII, NUL-terminated).
+	 *
+	 * @return whether the string is a valid IP address
+	 */
+	static bool IsValid(const char* s)
+		{
+		in6_addr tmp;
+		return ConvertString(s, &tmp);
+		}
+
+	/**
+	 * Unspecified IPv4 addr, "0.0.0.0".
+	 */
+	static const IPAddr v4_unspecified;
+
+	/**
+	 * Unspecified IPv6 addr, "::".
+	 */
+	static const IPAddr v6_unspecified;
 
 private:
 	friend class IPPrefix;
@@ -373,9 +447,9 @@ private:
 	 * Initializes an address instance from a string representation.
 	 *
 	 * @param s String containing an IP address as either a dotted IPv4
-	 * address or a hex IPv6 address.
+	 * address or a hex IPv6 address (ASCII, NUL-terminated).
 	 */
-	void Init(const std::string& s);
+	void Init(const char* s);
 
 	in6_addr in6; // IPv6 or v4-to-v6-mapped address
 
@@ -447,9 +521,9 @@ inline void IPAddr::ConvertToThreadingValue(threading::Value::addr_t* v) const
 	}
 
 /**
-  * Returns a hash key for a given ConnID. Passes ownership to caller.
+  * Returns a map key for a given ConnID.
   */
-HashKey* BuildConnIDHashKey(const ConnID& id);
+ConnIDKey BuildConnIDKey(const ConnID& id);
 
 /**
  * Class storing both IPv4 and IPv6 prefixes
@@ -571,7 +645,7 @@ public:
 		{
 		struct {
 			in6_addr ip;
-			uint32 len;
+			uint32_t len;
 		} key;
 
 		key.ip = prefix.in6;
@@ -634,6 +708,28 @@ public:
 	friend bool operator>(const IPPrefix& net1, const IPPrefix& net2)
 		{
 		return ! ( net1 <= net2 );
+		}
+
+	/**
+	 * Converts an IPv4 or IPv6 prefix string into a network address prefix structure.
+	 *
+	 * @param s the IPv4 or IPv6 prefix string to convert (ASCII, NUL-terminated).
+	 *
+	 * @param result buffer that the caller supplies to store the result.
+	 *
+	 * @return whether the conversion was successful.
+	 */
+	static bool ConvertString(const char* s, IPPrefix* result);
+
+	/**
+	 * @param s the IPv4 or IPv6 prefix string to convert (ASCII, NUL-terminated).
+	 *
+	 * @return whether the string is a valid IP address prefix
+	 */
+	static bool IsValid(const char* s)
+		{
+		IPPrefix tmp;
+		return ConvertString(s, &tmp);
 		}
 
 private:

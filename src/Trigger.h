@@ -4,7 +4,7 @@
 #include <list>
 #include <map>
 
-#include "StateAccess.h"
+#include "Notifier.h"
 #include "Traverse.h"
 
 // Triggers are the heart of "when" statements: expressions that when
@@ -13,7 +13,7 @@
 class TriggerTimer;
 class TriggerTraversalCallback;
 
-class Trigger : public NotifierRegistry::Notifier, public BroObj {
+class Trigger : public BroObj, public notifier::Receiver {
 public:
 	// Don't access Trigger objects; they take care of themselves after
 	// instantiation.  Note that if the condition is already true, the
@@ -21,7 +21,7 @@ public:
 	// right away.
 	Trigger(Expr* cond, Stmt* body, Stmt* timeout_stmts, Expr* timeout,
 		Frame* f, bool is_return, const Location* loc);
-	~Trigger();
+	~Trigger() override;
 
 	// Evaluates the condition. If true, executes the body and deletes
 	// the object deleted.
@@ -57,16 +57,14 @@ public:
 
 	bool Disabled() const { return disabled; }
 
-	virtual void Describe(ODesc* d) const { d->Add("<trigger>"); }
-
+	void Describe(ODesc* d) const override
+		{ d->Add("<trigger>"); }
 	// Overidden from Notifier.  We queue the trigger and evaluate it
 	// later to avoid race conditions.
-	virtual void Access(ID* id, const StateAccess& sa)
-		{ QueueTrigger(this); }
-	virtual void Access(Val* val, const StateAccess& sa)
+	void Modified(notifier::Modifiable* m) override
 		{ QueueTrigger(this); }
 
-	virtual const char* Name() const;
+	const char* Name() const;
 
 	static void QueueTrigger(Trigger* trigger);
 
@@ -104,8 +102,7 @@ private:
 	bool delayed; // true if a function call is currently being delayed
 	bool disabled;
 
-	val_list vals;
-	id_list ids;
+	std::vector<std::pair<BroObj *, notifier::Modifiable*>> objs;
 
 	typedef map<const CallExpr*, Val*> ValCache;
 	ValCache cache;

@@ -2,13 +2,10 @@
 #include "EventHandler.h"
 #include "Func.h"
 #include "Scope.h"
-#include "RemoteSerializer.h"
 #include "NetVar.h"
 
-#ifdef ENABLE_BROKER
 #include "broker/Manager.h"
 #include "broker/Data.h"
-#endif
 
 EventHandler::EventHandler(const char* arg_name)
 	{
@@ -30,21 +27,17 @@ EventHandler::~EventHandler()
 EventHandler::operator bool() const
 	{
 	return enabled && ((local && local->HasBodies())
-			   || receivers.length()
 			   || generate_always
-#ifdef ENABLE_BROKER
-			   || ! auto_remote_send.empty()
-			   // TODO: and require a subscriber interested in a topic or unsolicited flags?
-#endif
-	                   );
+			   || ! auto_publish.empty());
 	}
 
-FuncType* EventHandler::FType()
+FuncType* EventHandler::FType(bool check_export)
 	{
 	if ( type )
 		return type;
 
-	ID* id = lookup_ID(name, current_module.c_str());
+	ID* id = lookup_ID(name, current_module.c_str(), false, false,
+	                   check_export);
 
 	if ( ! id )
 		return 0;
@@ -78,20 +71,11 @@ void EventHandler::Call(val_list* vl, bool no_remote)
 
 	if ( ! no_remote )
 		{
-		loop_over_list(receivers, i)
+		if ( ! auto_publish.empty() )
 			{
-			SerialInfo info(remote_serializer);
-			remote_serializer->SendCall(&info, receivers[i], name, vl);
-			}
-
-#ifdef ENABLE_BROKER
-
-		if ( ! auto_remote_send.empty() )
-			{
-			// TODO: also short-circuit based on interested subscribers/flags?
-			broker::message msg;
-			msg.reserve(vl->length() + 1);
-			msg.emplace_back(Name());
+			// Send event in form [name, xs...] where xs represent the arguments.
+			broker::vector xs;
+			xs.reserve(vl->length());
 			bool valid_args = true;
 
 			for ( auto i = 0; i < vl->length(); ++i )
@@ -99,30 +83,33 @@ void EventHandler::Call(val_list* vl, bool no_remote)
 				auto opt_data = bro_broker::val_to_data((*vl)[i]);
 
 				if ( opt_data )
-					msg.emplace_back(move(*opt_data));
+					xs.emplace_back(move(*opt_data));
 				else
 					{
 					valid_args = false;
-					auto_remote_send.clear();
-					reporter->Error("failed auto-remote event '%s', disabled",
-					                Name());
+					auto_publish.clear();
+					reporter->Error("failed auto-remote event '%s', disabled", Name());
 					break;
 					}
 				}
 
 			if ( valid_args )
 				{
-				for ( auto it = auto_remote_send.begin();
-				      it != auto_remote_send.end(); ++it )
+				for ( auto it = auto_publish.begin(); ; )
 					{
-					if ( std::next(it) == auto_remote_send.end() )
-						broker_mgr->Event(it->first, move(msg), it->second);
+					const auto& topic = *it;
+					++it;
+
+					if ( it != auto_publish.end() )
+						broker_mgr->PublishEvent(topic, Name(), xs);
 					else
-						broker_mgr->Event(it->first, msg, it->second);
+						{
+						broker_mgr->PublishEvent(topic, Name(), std::move(xs));
+						break;
+						}
 					}
 				}
 			}
-#endif
 		}
 
 	if ( local )
@@ -130,8 +117,8 @@ void EventHandler::Call(val_list* vl, bool no_remote)
 		Unref(local->Call(vl));
 	else
 		{
-		loop_over_list(*vl, i)
-			Unref((*vl)[i]);
+		for ( auto v : *vl )
+			Unref(v);
 		}
 	}
 
@@ -177,41 +164,10 @@ void EventHandler::NewEvent(val_list* vl)
 		vargs->Assign(i, rec);
 		}
 
-	val_list* mvl = new val_list(2);
-	mvl->append(new StringVal(name));
-	mvl->append(vargs);
-
-	Event* ev = new Event(new_event, mvl);
+	Event* ev = new Event(new_event, {
+		new StringVal(name),
+		vargs,
+	});
 	mgr.Dispatch(ev);
 	}
 
-void EventHandler::AddRemoteHandler(SourceID peer)
-	{
-	receivers.append(peer);
-	}
-
-void EventHandler::RemoveRemoteHandler(SourceID peer)
-	{
-	receivers.remove(peer);
-	}
-
-bool EventHandler::Serialize(SerialInfo* info) const
-	{
-	return SERIALIZE(name);
-	}
-
-EventHandler* EventHandler::Unserialize(UnserialInfo* info)
-	{
-	char* name;
-	if ( ! UNSERIALIZE_STR(&name, 0) )
-		return 0;
-
-	EventHandler* h = event_registry->Lookup(name);
-	if ( ! h )
-		{
-		h = new EventHandler(name);
-		event_registry->Register(h);
-		}
-
-	return h;
-	}

@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <ctype.h>
 
@@ -58,12 +58,12 @@ int NetbiosSSN_Interpreter::ParseMessage(unsigned int type, unsigned int flags,
 	{
 	if ( netbios_session_message )
 		{
-		val_list* vl = new val_list;
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(is_query, TYPE_BOOL));
-		vl->append(new Val(type, TYPE_COUNT));
-		vl->append(new Val(len, TYPE_COUNT));
-		analyzer->ConnectionEvent(netbios_session_message, vl);
+		analyzer->ConnectionEventFast(netbios_session_message, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_query),
+			val_mgr->GetCount(type),
+			val_mgr->GetCount(len),
+		});
 		}
 
 	switch ( type ) {
@@ -97,7 +97,7 @@ int NetbiosSSN_Interpreter::ParseMessage(unsigned int type, unsigned int flags,
 		return ParseDatagram(data, len, is_query);
 
  	default:
-		analyzer->Weird(fmt("unknown_netbios_type: 0x%x", type));
+		analyzer->Weird("unknown_netbios_type", fmt("0x%x", type));
  		return 1;
 	}
 	}
@@ -143,7 +143,7 @@ int NetbiosSSN_Interpreter::ParseMessageTCP(const u_char* data, int len,
 	NetbiosSSN_RawMsgHdr hdr(data, len);
 
 	if ( hdr.length > unsigned(len) )
-		analyzer->Weird(fmt("excess_netbios_hdr_len (%d > %d)",
+		analyzer->Weird("excess_netbios_hdr_len", fmt("(%d > %d)",
 					hdr.length, len));
 
 	else if ( hdr.length < unsigned(len) )
@@ -162,12 +162,12 @@ int NetbiosSSN_Interpreter::ParseMessageUDP(const u_char* data, int len,
 	NetbiosDGM_RawMsgHdr hdr(data, len);
 
 	if ( unsigned(hdr.length-14) > unsigned(len) )
-		analyzer->Weird(fmt("excess_netbios_hdr_len (%d > %d)",
+		analyzer->Weird("excess_netbios_hdr_len", fmt("(%d > %d)",
 				hdr.length, len));
 
 	else if ( hdr.length < unsigned(len) )
 		{
-		analyzer->Weird(fmt("deficit_netbios_hdr_len (%d < %d)",
+		analyzer->Weird("deficit_netbios_hdr_len", fmt("(%d < %d)",
 				hdr.length, len));
 		len = hdr.length;
 		}
@@ -328,13 +328,19 @@ void NetbiosSSN_Interpreter::Event(EventHandlerPtr event, const u_char* data,
 	if ( ! event )
 		return;
 
-	val_list* vl = new val_list;
-	vl->append(analyzer->BuildConnVal());
 	if ( is_orig >= 0 )
-		vl->append(new Val(is_orig, TYPE_BOOL));
-	vl->append(new StringVal(new BroString(data, len, 0)));
-
-	analyzer->ConnectionEvent(event, vl);
+		{
+		analyzer->ConnectionEventFast(event, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetBool(is_orig),
+			new StringVal(new BroString(data, len, 0)),
+		});
+		}
+	else
+		analyzer->ConnectionEventFast(event, {
+			analyzer->BuildConnVal(),
+			new StringVal(new BroString(data, len, 0)),
+		});
 	}
 
 
@@ -455,7 +461,7 @@ void Contents_NetbiosSSN::DeliverStream(int len, const u_char* data, bool orig)
 	}
 
 NetbiosSSN_Analyzer::NetbiosSSN_Analyzer(Connection* conn)
-: tcp::TCP_ApplicationAnalyzer("NETBIOS", conn)
+: tcp::TCP_ApplicationAnalyzer("NETBIOSSSN", conn)
 	{
 	//smb_session = new SMB_Session(this);
 	interp = new NetbiosSSN_Interpreter(this);
@@ -512,7 +518,7 @@ void NetbiosSSN_Analyzer::ConnectionClosed(tcp::TCP_Endpoint* endpoint,
 	}
 
 void NetbiosSSN_Analyzer::DeliverPacket(int len, const u_char* data, bool orig,
-					uint64 seq, const IP_Hdr* ip, int caplen)
+					uint64_t seq, const IP_Hdr* ip, int caplen)
 	{
 	tcp::TCP_ApplicationAnalyzer::DeliverPacket(len, data, orig, seq, ip, caplen);
 

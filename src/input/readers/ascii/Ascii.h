@@ -7,6 +7,7 @@
 #include <vector>
 #include <fstream>
 #include <memory>
+#include <sys/types.h>
 
 #include "input/ReaderBackend.h"
 #include "threading/formatters/Ascii.h"
@@ -36,7 +37,7 @@ struct FieldMapping {
 class Ascii : public ReaderBackend {
 public:
 	explicit Ascii(ReaderFrontend* frontend);
-	~Ascii();
+	~Ascii() override;
 
 	// prohibit copying and moving
 	Ascii(const Ascii&) = delete;
@@ -63,6 +64,12 @@ private:
 
 	ifstream file;
 	time_t mtime;
+	ino_t ino;
+
+	// The name using which we actually load the file -- compared
+	// to the input source name, this one may have a path_prefix
+	// attached to it.
+	string fname;
 
 	// map columns in the file to columns to send back to the manager
 	vector<FieldMapping> columnMap;
@@ -77,6 +84,7 @@ private:
 	string unset_field;
 	bool fail_on_invalid_lines;
 	bool fail_on_file_problem;
+	string path_prefix;
 
 	// this is an internal indicator in case the read is currently in a failed state
 	// it's used to suppress duplicate error messages.

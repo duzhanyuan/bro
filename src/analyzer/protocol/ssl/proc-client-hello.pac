@@ -3,7 +3,8 @@
 					client_random : bytestring,
 					session_id : uint8[],
 					cipher_suites16 : uint16[],
-					cipher_suites24 : uint24[]) : bool
+					cipher_suites24 : uint24[],
+					compression_methods: uint8[]) : bool
 		%{
 		if ( ! version_ok(version) )
 			{
@@ -24,15 +25,25 @@
 			VectorVal* cipher_vec = new VectorVal(internal_type("index_vec")->AsVectorType());
 			for ( unsigned int i = 0; i < cipher_suites->size(); ++i )
 				{
-				Val* ciph = new Val((*cipher_suites)[i], TYPE_COUNT);
+				Val* ciph = val_mgr->GetCount((*cipher_suites)[i]);
 				cipher_vec->Assign(i, ciph);
 				}
 
+			VectorVal* comp_vec = new VectorVal(internal_type("index_vec")->AsVectorType());
+			if ( compression_methods )
+				{
+				for ( unsigned int i = 0; i < compression_methods->size(); ++i )
+					{
+					Val* comp = val_mgr->GetCount((*compression_methods)[i]);
+					comp_vec->Assign(i, comp);
+					}
+				}
+
 			BifEvent::generate_ssl_client_hello(bro_analyzer(), bro_analyzer()->Conn(),
-							version, ts, new StringVal(client_random.length(),
+							version, record_version(), ts, new StringVal(client_random.length(),
 							(const char*) client_random.data()),
 							to_string_val(session_id),
-							cipher_vec);
+							cipher_vec, comp_vec);
 
 			delete cipher_suites;
 			}

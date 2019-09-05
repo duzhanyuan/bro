@@ -4,6 +4,7 @@
 #define INPUT_READERS_BINARY_H
 
 #include <fstream>
+#include <sys/types.h>
 
 #include "input/ReaderBackend.h"
 
@@ -14,19 +15,18 @@ namespace input { namespace reader {
  */
 class Binary : public ReaderBackend {
 public:
-	Binary(ReaderFrontend* frontend);
-
-	~Binary();
+	explicit Binary(ReaderFrontend* frontend);
+	~Binary() override;
 
 	static ReaderBackend* Instantiate(ReaderFrontend* frontend)
 		{ return new Binary(frontend); }
 
 protected:
-	virtual bool DoInit(const ReaderInfo& info, int arg_num_fields,
-	                    const threading::Field* const* fields);
-	virtual void DoClose();
-	virtual bool DoUpdate();
-	virtual bool DoHeartbeat(double network_time, double current_time);
+	bool DoInit(const ReaderInfo& info, int arg_num_fields,
+	            const threading::Field* const* fields) override;
+	void DoClose() override;
+	bool DoUpdate() override;
+	bool DoHeartbeat(double network_time, double current_time) override;
 
 private:
 	bool OpenInput();
@@ -37,10 +37,12 @@ private:
 	string fname;
 	ifstream* in;
 	time_t mtime;
+	ino_t ino;
 	bool firstrun;
 
 	// options set from the script-level.
 	static streamsize chunk_size;
+	string path_prefix;
 };
 
 }

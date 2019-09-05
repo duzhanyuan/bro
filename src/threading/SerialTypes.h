@@ -13,7 +13,6 @@
 using namespace std;
 
 class SerializationFormat;
-class RemoteSerializer;
 
 namespace threading {
 
@@ -26,7 +25,7 @@ struct Field {
 	//! port, one for the type), and this specifies the secondary name.
 	const char* secondary_name;
 	TypeTag type;	//! Type of the field.
-	TypeTag subtype;	//! Inner type for sets.
+	TypeTag subtype;	//! Inner type for sets and vectors.
 	bool optional;	//! True if field is optional.
 
 	/**
@@ -78,8 +77,6 @@ struct Field {
 	string TypeName() const;
 
 private:
-	friend class ::RemoteSerializer;
-
 	// Force usage of constructor above.
 	Field()	{}
 };
@@ -92,6 +89,7 @@ private:
  */
 struct Value {
 	TypeTag type;	//! The type of the value.
+	TypeTag subtype;	//! Inner type for sets and vectors.
 	bool present;	//! False for optional record fields that are not set.
 
 	struct set_t { bro_int_t size; Value** vals; };
@@ -128,6 +126,7 @@ struct Value {
 		vec_t vector_val;
 		addr_t addr_val;
 		subnet_t subnet_val;
+		const char* pattern_text_val;
 
 		struct {
 			char* data;
@@ -146,7 +145,20 @@ struct Value {
 	* that is not set.
 	 */
 	Value(TypeTag arg_type = TYPE_ERROR, bool arg_present = true)
-		: type(arg_type), present(arg_present)	{}
+		: type(arg_type), subtype(TYPE_VOID), present(arg_present)	{}
+
+	/**
+	* Constructor.
+	*
+	* arg_type: The type of the value.
+	*
+	* arg_type: The subtype of the value for sets and vectors.
+	*
+	* arg_present: False if the value represents an optional record field
+	* that is not set.
+	 */
+	Value(TypeTag arg_type, TypeTag arg_subtype, bool arg_present = true)
+		: type(arg_type), subtype(arg_subtype), present(arg_present)	{}
 
 	/**
 	 * Destructor.
@@ -185,4 +197,4 @@ private:
 
 }
 
-#endif /* THREADING_SERIALIZATIONTZPES_H */
+#endif /* THREADING_SERIALIZATIONTYPES_H */

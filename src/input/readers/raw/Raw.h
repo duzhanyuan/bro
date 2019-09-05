@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <sys/types.h>
 
 #include "input/ReaderBackend.h"
 
@@ -18,7 +19,7 @@ namespace input { namespace reader {
 class Raw : public ReaderBackend {
 public:
 	explicit Raw(ReaderFrontend* frontend);
-	~Raw();
+	~Raw() override;
 
 	// prohibit copying and moving
 	Raw(const Raw&) = delete;
@@ -51,6 +52,7 @@ private:
 	bool execute;
 	bool firstrun;
 	time_t mtime;
+	ino_t ino;
 
 	// options set from the script-level.
 	string separator;

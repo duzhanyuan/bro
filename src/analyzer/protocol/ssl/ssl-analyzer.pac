@@ -17,15 +17,15 @@ refine connection SSL_Conn += {
 
 	function proc_v2_client_master_key(rec: SSLRecord, cipher_kind: int) : bool
 		%{
-		BifEvent::generate_ssl_established(bro_analyzer(),
-				bro_analyzer()->Conn());
+		if ( ssl_established )
+			BifEvent::generate_ssl_established(bro_analyzer(), bro_analyzer()->Conn());
 
 		return true;
 		%}
 
 	function proc_handshake(rec: SSLRecord, data: bytestring, is_orig: bool) : bool
 		%{
-		bro_analyzer()->SendHandshake(data.begin(), data.end(), is_orig);
+		bro_analyzer()->SendHandshake(${rec.raw_tls_version}, data.begin(), data.end(), is_orig);
 		return true;
 		%}
 };
@@ -38,13 +38,13 @@ refine typeattr V2Error += &let {
 
 refine typeattr V2ClientHello += &let {
 	proc : bool = $context.connection.proc_client_hello(client_version, 0,
-				challenge, session_id, 0, ciphers);
+				challenge, session_id, 0, ciphers, 0);
 };
 
 refine typeattr V2ServerHello += &let {
 	check_v2 : bool = $context.connection.proc_check_v2_server_hello_version(server_version);
 
-	proc : bool = $context.connection.proc_server_hello(server_version, 0,
+	proc : bool = $context.connection.proc_server_hello(server_version, 1,
 				conn_id_data, 0, 0, ciphers, 0) &requires(check_v2) &if(check_v2 == true);
 
 	cert : bool = $context.connection.proc_v2_certificate(rec.is_orig, cert_data)

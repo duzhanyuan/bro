@@ -1,14 +1,17 @@
 
-#include <sys/signal.h>
 #include <signal.h>
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "BasicThread.h"
 #include "Manager.h"
 #include "pthread.h"
 
 #ifdef HAVE_LINUX
 #include <sys/prctl.h>
+#endif
+
+#ifdef __FreeBSD__
+#include <pthread_np.h>
 #endif
 
 using namespace threading;
@@ -60,8 +63,8 @@ void BasicThread::SetOSName(const char* arg_name)
 	pthread_setname_np(arg_name);
 #endif
 
-#ifdef FREEBSD
-	pthread_set_name_np(thread.native_handle(), arg_name, arg_name);
+#ifdef __FreeBSD__
+	pthread_set_name_np(thread.native_handle(), arg_name);
 #endif
 	}
 
@@ -98,7 +101,7 @@ const char* BasicThread::Strerror(int err)
 	if ( ! strerr_buffer )
 		strerr_buffer = new char[256];
 
-	strerror_r(err, strerr_buffer, 256);
+	bro_strerror_r(err, strerr_buffer, 256);
 	return strerr_buffer;
 	}
 

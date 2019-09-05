@@ -1,22 +1,24 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "ID.h"
 #include "Val.h"
 #include "Scope.h"
 #include "Reporter.h"
 
+typedef PList<Scope> scope_list;
+
 static scope_list scopes;
 static Scope* top_scope;
 
 
-Scope::Scope(ID* id)
+Scope::Scope(ID* id, attr_list* al)
 	{
 	scope_id = id;
+	attrs = al;
 	return_type = 0;
 
-	local = new PDict(ID)(ORDERED);
 	inits = new id_list;
 
 	if ( id )
@@ -39,12 +41,19 @@ Scope::Scope(ID* id)
 
 Scope::~Scope()
 	{
-	for ( int i = 0; i < local->Length(); ++i )
-		Unref(local->NthEntry(i));
+	for ( const auto& entry : local )
+		Unref(entry.second);
+
+	if ( attrs )
+		{
+		for ( const auto& attr : *attrs )
+			Unref(attr);
+
+		delete attrs;
+		}
 
 	Unref(scope_id);
 	Unref(return_type);
-	delete local;
 	delete inits;
 	}
 
@@ -71,7 +80,7 @@ void Scope::Describe(ODesc* d) const
 		d->SP();
 		d->Add(return_type != 0);
 		d->SP();
-		d->Add(local->Length());
+		d->Add(static_cast<uint64_t>(local.size()));
 		d->SP();
 		}
 
@@ -87,9 +96,9 @@ void Scope::Describe(ODesc* d) const
 		d->NL();
 		}
 
-	for ( int i = 0; i < local->Length(); ++i )
+	for ( const auto& entry : local )
 		{
-		ID* id = local->NthEntry(i);
+		ID* id = entry.second;
 		id->Describe(d);
 		d->NL();
 		}
@@ -97,13 +106,9 @@ void Scope::Describe(ODesc* d) const
 
 TraversalCode Scope::Traverse(TraversalCallback* cb) const
 	{
-	PDict(ID)* ids = GetIDs();
-	IterCookie* iter = ids->InitForIteration();
-
-	HashKey* key;
-	ID* id;
-	while ( (id = ids->NextEntry(key, iter)) )
+	for ( const auto& entry : local )
 		{
+		ID* id = entry.second;
 		TraversalCode tc = id->Traverse(cb);
 		HANDLE_TC_STMT_PRE(tc);
 		}
@@ -113,17 +118,17 @@ TraversalCode Scope::Traverse(TraversalCallback* cb) const
 
 
 ID* lookup_ID(const char* name, const char* curr_module, bool no_global,
-	      bool same_module_only)
+	      bool same_module_only, bool check_export)
 	{
 	string fullname = make_full_var_name(curr_module, name);
 
 	string ID_module = extract_module_name(fullname.c_str());
-	bool need_export = ID_module != GLOBAL_MODULE_NAME &&
-				ID_module != curr_module;
+	bool need_export = check_export && (ID_module != GLOBAL_MODULE_NAME &&
+	                                    ID_module != curr_module);
 
 	for ( int i = scopes.length() - 1; i >= 0; --i )
 		{
-		ID* id = scopes[i]->Lookup(fullname.c_str());
+		ID* id = scopes[i]->Lookup(fullname);
 		if ( id )
 			{
 			if ( need_export && ! id->IsExport() && ! in_debug )
@@ -139,7 +144,7 @@ ID* lookup_ID(const char* name, const char* curr_module, bool no_global,
 			     ! same_module_only) )
 		{
 		string globalname = make_full_var_name(GLOBAL_MODULE_NAME, name);
-		ID* id = global_scope()->Lookup(globalname.c_str());
+		ID* id = global_scope()->Lookup(globalname);
 		if ( id )
 			{
 			Ref(id);
@@ -166,10 +171,9 @@ ID* install_ID(const char* name, const char* module_name,
 	else
 		scope = SCOPE_FUNCTION;
 
-	string full_name_str = make_full_var_name(module_name, name);
-	char* full_name = copy_string(full_name_str.c_str());
+	string full_name = make_full_var_name(module_name, name);
 
-	ID* id = new ID(full_name, scope, is_export);
+	ID* id = new ID(full_name.data(), scope, is_export);
 	if ( SCOPE_FUNCTION != scope )
 		global_scope()->Insert(full_name, id);
 	else
@@ -183,13 +187,13 @@ ID* install_ID(const char* name, const char* module_name,
 
 void push_existing_scope(Scope* scope)
 	{
-	scopes.append(scope);
+	scopes.push_back(scope);
 	}
 
-void push_scope(ID* id)
+void push_scope(ID* id, attr_list* attrs)
 	{
-	top_scope = new Scope(id);
-	scopes.append(top_scope);
+	top_scope = new Scope(id, attrs);
+	scopes.push_back(top_scope);
 	}
 
 Scope* pop_scope()

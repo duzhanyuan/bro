@@ -13,6 +13,7 @@
 #include "../Reporter.h"
 #include "../Func.h"
 #include "../Event.h"
+#include "../util.h"
 
 using namespace plugin;
 
@@ -173,39 +174,53 @@ bool Manager::ActivateDynamicPluginInternal(const std::string& name, bool ok_if_
 
 	DBG_LOG(DBG_PLUGINS, "Activating plugin %s", name.c_str());
 
-	// Add the "scripts" and "bif" directories to BROPATH.
+	// Add the "scripts" and "bif" directories to ZEEKPATH.
 	std::string scripts = dir + "scripts";
 
 	if ( is_dir(scripts) )
 		{
-		DBG_LOG(DBG_PLUGINS, "  Adding %s to BROPATH", scripts.c_str());
+		DBG_LOG(DBG_PLUGINS, "  Adding %s to ZEEKPATH", scripts.c_str());
 		add_to_bro_path(scripts);
 		}
 
-	// First load {scripts}/__preload__.bro automatically.
-	string init = dir + "scripts/__preload__.bro";
+	string init;
 
-	if ( is_file(init) )
+	// First load {scripts}/__preload__.zeek automatically.
+	for (const string& ext : script_extensions)
 		{
-		DBG_LOG(DBG_PLUGINS, "  Loading %s", init.c_str());
-		scripts_to_load.push_back(init);
+		init = dir + "scripts/__preload__" + ext;
+
+		if ( is_file(init) )
+			{
+			DBG_LOG(DBG_PLUGINS, "  Loading %s", init.c_str());
+			scripts_to_load.push_back(init);
+			break;
+			}
 		}
 
-	// Load {bif,scripts}/__load__.bro automatically.
-	init = dir + "lib/bif/__load__.bro";
-
-	if ( is_file(init) )
+	// Load {bif,scripts}/__load__.zeek automatically.
+	for (const string& ext : script_extensions)
 		{
-		DBG_LOG(DBG_PLUGINS, "  Loading %s", init.c_str());
-		scripts_to_load.push_back(init);
+		init = dir + "lib/bif/__load__" + ext;
+
+		if ( is_file(init) )
+			{
+			DBG_LOG(DBG_PLUGINS, "  Loading %s", init.c_str());
+			scripts_to_load.push_back(init);
+			break;
+			}
 		}
 
-	init = dir + "scripts/__load__.bro";
-
-	if ( is_file(init) )
+	for (const string& ext : script_extensions)
 		{
-		DBG_LOG(DBG_PLUGINS, "  Loading %s", init.c_str());
-		scripts_to_load.push_back(init);
+		init = dir + "scripts/__load__" + ext;
+
+		if ( is_file(init) )
+			{
+			DBG_LOG(DBG_PLUGINS, "  Loading %s", init.c_str());
+			scripts_to_load.push_back(init);
+			break;
+			}
 		}
 
 	// Load shared libraries.
@@ -242,10 +257,6 @@ bool Manager::ActivateDynamicPluginInternal(const std::string& name, bool ok_if_
 			current_plugin->InitializeComponents();
 
 			plugins_by_path.insert(std::make_pair(normalize_path(dir), current_plugin));
-
-			if ( current_plugin->APIVersion() != BRO_PLUGIN_API_VERSION )
-				reporter->FatalError("plugin's API version does not match Bro (expected %d, got %d in %s)",
-						     BRO_PLUGIN_API_VERSION, current_plugin->APIVersion(), path);
 
 			// We execute the pre-script initialization here; this in
 			// fact could be *during* script initialization if we got
@@ -573,31 +584,19 @@ void Manager::RequestBroObjDtor(BroObj* obj, Plugin* plugin)
 	obj->NotifyPluginsOnDtor();
 	}
 
-int Manager::HookLoadFile(const string& file)
+int Manager::HookLoadFile(const Plugin::LoadType type, const string& file, const string& resolved)
 	{
 	HookArgumentList args;
 
 	if ( HavePluginForHook(META_HOOK_PRE) )
 		{
+		args.push_back(HookArgument(type));
 		args.push_back(HookArgument(file));
+		args.push_back(HookArgument(resolved));
 		MetaHookPre(HOOK_LOAD_FILE, args);
 		}
 
 	hook_list* l = hooks[HOOK_LOAD_FILE];
-
-	size_t i = file.find_last_of("./");
-
-	string ext;
-	string normalized_file = file;
-
-	if ( i != string::npos && file[i] == '.' )
-		ext = file.substr(i + 1);
-	else
-		{
-		// Add .bro as default extension.
-		normalized_file = file + ".bro";
-		ext = "bro";
-		}
 
 	int rc = -1;
 
@@ -606,7 +605,7 @@ int Manager::HookLoadFile(const string& file)
 			{
 			Plugin* p = (*i).second;
 
-			rc = p->HookLoadFile(normalized_file, ext);
+			rc = p->HookLoadFile(type, file, resolved);
 
 			if ( rc >= 0 )
 				break;
@@ -856,6 +855,52 @@ bool Manager::HookLogWrite(const std::string& writer,
 
 	return result;
 	}
+
+bool Manager::HookReporter(const std::string& prefix, const EventHandlerPtr event,
+			   const Connection* conn, const val_list* addl, bool location,
+			   const Location* location1, const Location* location2,
+			   bool time, const std::string& message)
+
+	{
+	HookArgumentList args;
+
+	if ( HavePluginForHook(META_HOOK_PRE) )
+		{
+		args.push_back(HookArgument(prefix));
+		args.push_back(HookArgument(conn));
+		args.push_back(HookArgument(addl));
+		args.push_back(HookArgument(location1));
+		args.push_back(HookArgument(location2));
+		args.push_back(HookArgument(location));
+		args.push_back(HookArgument(time));
+		args.push_back(HookArgument(message));
+		MetaHookPre(HOOK_REPORTER, args);
+		}
+
+	hook_list* l = hooks[HOOK_REPORTER];
+
+	bool result = true;
+
+	if ( l )
+		{
+		for ( hook_list::iterator i = l->begin(); i != l->end(); ++i )
+			{
+			Plugin* p = (*i).second;
+
+			if ( ! p->HookReporter(prefix, event, conn, addl, location, location1, location2, time, message) )
+				{
+				result = false;
+				break;
+				}
+			}
+		}
+
+	if ( HavePluginForHook(META_HOOK_POST) )
+		MetaHookPost(HOOK_REPORTER, args, HookArgument(result));
+
+	return result;
+	}
+
 
 void Manager::MetaHookPre(HookType hook, const HookArgumentList& args) const
 	{

@@ -3,7 +3,7 @@
 #ifndef TUNNELS_H
 #define TUNNELS_H
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "NetVar.h"
 #include "IPAddr.h"
 #include "Val.h"
@@ -94,6 +94,14 @@ public:
 			  ((ec1.src_addr == ec2.src_addr && ec1.dst_addr == ec2.dst_addr) ||
 			   (ec1.src_addr == ec2.dst_addr && ec1.dst_addr == ec2.src_addr));
 
+		if ( ec1.type == BifEnum::Tunnel::VXLAN )
+			// Reversing endpoints is still same tunnel, destination port is
+			// always the same.
+			return ec1.dst_port == ec2.dst_port &&
+			       ec1.uid == ec2.uid && ec1.proto == ec2.proto &&
+			  ((ec1.src_addr == ec2.src_addr && ec1.dst_addr == ec2.dst_addr) ||
+			   (ec1.src_addr == ec2.dst_addr && ec1.dst_addr == ec2.src_addr));
+
 		return ec1.src_addr == ec2.src_addr && ec1.dst_addr == ec2.dst_addr &&
 		       ec1.src_port == ec2.src_port && ec1.dst_port == ec2.dst_port &&
 		       ec1.uid == ec2.uid && ec1.proto == ec2.proto;
@@ -108,8 +116,8 @@ public:
 protected:
 	IPAddr src_addr;
 	IPAddr dst_addr;
-	uint16 src_port;
-	uint16 dst_port;
+	uint16_t src_port;
+	uint16_t dst_port;
 	TransportProto proto;
 	BifEnum::Tunnel::Type type;
 	Bro::UID uid;

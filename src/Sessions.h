@@ -3,6 +3,9 @@
 #ifndef sessions_h
 #define sessions_h
 
+#include <map>
+#include <utility>
+
 #include "Dict.h"
 #include "CompHash.h"
 #include "IP.h"
@@ -13,16 +16,10 @@
 #include "TunnelEncapsulation.h"
 #include "analyzer/protocol/tcp/Stats.h"
 
-#include <utility>
-
 class EncapsulationStack;
 class Connection;
-class OSFingerprint;
 class ConnCompressor;
 struct ConnID;
-
-declare(PDict,Connection);
-declare(PDict,FragReassembler);
 
 class Discarder;
 class PacketFilter;
@@ -31,21 +28,21 @@ namespace analyzer { namespace stepping_stone { class SteppingStoneManager; } }
 namespace analyzer { namespace arp { class ARP_Analyzer; } }
 
 struct SessionStats {
-	int num_TCP_conns;
-	int max_TCP_conns;
-	uint64 cumulative_TCP_conns;
+	size_t num_TCP_conns;
+	size_t max_TCP_conns;
+	uint64_t cumulative_TCP_conns;
 
-	int num_UDP_conns;
-	int max_UDP_conns;
-	uint64 cumulative_UDP_conns;
+	size_t num_UDP_conns;
+	size_t max_UDP_conns;
+	uint64_t cumulative_UDP_conns;
 
-	int num_ICMP_conns;
-	int max_ICMP_conns;
-	uint64 cumulative_ICMP_conns;
+	size_t num_ICMP_conns;
+	size_t max_ICMP_conns;
+	uint64_t cumulative_ICMP_conns;
 
-	int num_fragments;
-	int max_fragments;
-	uint64 num_packets;
+	size_t num_fragments;
+	size_t max_fragments;
+	uint64_t num_packets;
 };
 
 // Drains and deletes a timer manager if it hasn't seen any advances
@@ -56,7 +53,7 @@ public:
 	    : Timer(t, TIMER_TIMERMGR_EXPIRE), mgr(arg_mgr)
 		{ }
 
-	virtual void Dispatch(double t, int is_expire);
+	void Dispatch(double t, int is_expire) override;
 
 protected:
 	TimerMgr* mgr;
@@ -77,14 +74,6 @@ public:
 	FragReassembler* NextFragment(double t, const IP_Hdr* ip,
 				const u_char* pkt);
 
-	int Get_OS_From_SYN(struct os_type* retval,
-			uint16 tot, uint8 DF_flag, uint8 TTL, uint16 WSS,
-			uint8 ocnt, uint8* op, uint16 MSS, uint8 win_scale,
-			uint32 tstamp, /* uint8 TOS, */ uint32 quirks,
-			uint8 ECN) const;
-
-	bool CompareWithPreviousOSMatch(const IPAddr& addr, int id) const;
-
 	// Looks up the connection referred to by the given Val,
 	// which should be a conn_id record.  Returns nil if there's
 	// no such connection or the Val is ill-formed.
@@ -102,9 +91,9 @@ public:
 	void GetStats(SessionStats& s) const;
 
 	void Weird(const char* name, const Packet* pkt,
-	    const EncapsulationStack* encap = 0);
+	    const EncapsulationStack* encap = 0, const char* addl = "");
 	void Weird(const char* name, const IP_Hdr* ip,
-	    const EncapsulationStack* encap = 0);
+	    const EncapsulationStack* encap = 0, const char* addl = "");
 
 	PacketFilter* GetPacketFilter()
 		{
@@ -124,8 +113,7 @@ public:
 
 	unsigned int CurrentConnections()
 		{
-		return tcp_conns.Length() + udp_conns.Length() +
-			icmp_conns.Length();
+		return tcp_conns.size() + udp_conns.size() + icmp_conns.size();
 		}
 
 	void DoNextPacket(double t, const Packet *pkt, const IP_Hdr* ip_hdr,
@@ -151,8 +139,9 @@ public:
 
 	/**
 	 * Returns a wrapper IP_Hdr object if \a pkt appears to be a valid IPv4
-	 * or IPv6 header based on whether it's long enough to contain such a header
-	 * and also that the payload length field of that header matches the actual
+	 * or IPv6 header based on whether it's long enough to contain such a header,
+	 * if version given in the header matches the proto argument, and also checks
+	 * that the payload length field of that header matches the actual
 	 * length of \a pkt given by \a caplen.
 	 *
 	 * @param caplen The length of \a pkt in bytes.
@@ -163,7 +152,8 @@ public:
 	 *        if \a pkt looks like a valid IP packet or at least long enough
 	 *        to hold an IP header.
 	 * @return 0 If the inner IP packet appeared valid, else -1 if \a caplen
-	 *         is greater than the supposed IP packet's payload length field or
+	 *         is greater than the supposed IP packet's payload length field, -2
+	 *         if the version of the inner header does not match proto or
 	 *         1 if \a caplen is less than the supposed packet's payload length.
 	 *         In the -1 case, \a inner may still be non-null if \a caplen was
 	 *         long enough to be an IP header, and \a inner is always non-null
@@ -178,14 +168,18 @@ public:
 	analyzer::tcp::TCPStateStats tcp_stats;	// keeps statistics on TCP states
 
 protected:
-	friend class RemoteSerializer;
 	friend class ConnCompressor;
 	friend class TimerMgrExpireTimer;
 	friend class IPTunnelTimer;
 
-	Connection* NewConn(HashKey* k, double t, const ConnID* id,
-			const u_char* data, int proto, uint32 flow_lable,
+	using ConnectionMap = std::map<ConnIDKey, Connection*>;
+	using FragmentMap = std::map<FragReassemblerKey, FragReassembler*>;
+
+	Connection* NewConn(const ConnIDKey& k, double t, const ConnID* id,
+			const u_char* data, int proto, uint32_t flow_label,
 			const Packet* pkt, const EncapsulationStack* encapsulation);
+
+	Connection* LookupConn(const ConnectionMap& conns, const ConnIDKey& key);
 
 	// Check whether the tag of the current packet is consistent with
 	// the given connection.  Returns:
@@ -200,7 +194,7 @@ protected:
 	// generally a likely server port, false otherwise.
 	//
 	// Note, port is in host order.
-	bool IsLikelyServerPort(uint32 port,
+	bool IsLikelyServerPort(uint32_t port,
 				TransportProto transport_proto) const;
 
 	// Upon seeing the first packet of a connection, checks whether
@@ -208,9 +202,9 @@ protected:
 	// connections), and, if yes, whether we should flip the roles of
 	// originator and responder (based on known ports or such).
 	// Use tcp_flags=0 for non-TCP.
-	bool WantConnection(uint16 src_port, uint16 dest_port,
+	bool WantConnection(uint16_t src_port, uint16_t dest_port,
 				TransportProto transport_proto,
-				uint8 tcp_flags, bool& flip_roles);
+				uint8_t tcp_flags, bool& flip_roles);
 
 	// Record the given packet (if a dumper is active).  If len=0
 	// then the whole packet is recorded, otherwise just the first
@@ -220,14 +214,22 @@ protected:
 	// For a given protocol, checks whether the header's length as derived
 	// from lower-level headers or the length actually captured is less
 	// than that protocol's minimum header size.
-	bool CheckHeaderTrunc(int proto, uint32 len, uint32 caplen,
+	bool CheckHeaderTrunc(int proto, uint32_t len, uint32_t caplen,
 			      const Packet *pkt, const EncapsulationStack* encap);
 
-	CompositeHash* ch;
-	PDict(Connection) tcp_conns;
-	PDict(Connection) udp_conns;
-	PDict(Connection) icmp_conns;
-	PDict(FragReassembler) fragments;
+	// Inserts a new connection into the sessions map. If a connection with
+	// the same key already exists in the map, it will be overwritten by
+	// the new one.  Connection count stats get updated either way (so most
+	// cases should likely check that the key is not already in the map to
+	// avoid unnecessary incrementing of connecting counts).
+	void InsertConnection(ConnectionMap* m, const ConnIDKey& key, Connection* conn);
+
+	ConnectionMap tcp_conns;
+	ConnectionMap udp_conns;
+	ConnectionMap icmp_conns;
+	FragmentMap fragments;
+
+	SessionStats stats;
 
 	typedef pair<IPAddr, IPAddr> IPPair;
 	typedef pair<EncapsulatingConn, double> TunnelActivity;
@@ -239,10 +241,8 @@ protected:
 	analyzer::stepping_stone::SteppingStoneManager* stp_manager;
 	Discarder* discarder;
 	PacketFilter* packet_filter;
-	OSFingerprint* SYN_OS_Fingerprinter;
-	int build_backdoor_analyzer;
 	int dump_this_packet;	// if true, current packet should be recorded
-	uint64 num_packets_processed;
+	uint64_t num_packets_processed;
 	PacketProfiler* pkt_profiler;
 
 	// We may use independent timer managers for different sets of related
@@ -258,9 +258,9 @@ public:
 	: Timer(t + BifConst::Tunnel::ip_tunnel_timeout,
 			TIMER_IP_TUNNEL_INACTIVITY), tunnel_idx(p) {}
 
-	~IPTunnelTimer() {}
+	~IPTunnelTimer() override {}
 
-	void Dispatch(double t, int is_expire);
+	void Dispatch(double t, int is_expire) override;
 
 protected:
 	NetSessions::IPPair tunnel_idx;

@@ -7,7 +7,6 @@
 #include "util.h"
 #include "List.h"
 #include "Func.h"
-#include "RemoteSerializer.h"
 #include "iosource/IOSource.h"
 #include "iosource/PktSrc.h"
 #include "iosource/PktDumper.h"
@@ -67,8 +66,8 @@ extern double bro_start_network_time;
 // True if we're a in the process of cleaning-up just before termination.
 extern bool terminating;
 
-// True if the remote serializer is to be activated.
-extern bool using_communication;
+// True if Bro is currently parsing scripts.
+extern bool is_parsing;
 
 extern const Packet* current_pkt;
 extern int current_dispatched;

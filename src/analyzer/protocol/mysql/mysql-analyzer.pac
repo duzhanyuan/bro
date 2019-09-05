@@ -7,12 +7,12 @@ refine flow MySQL_Flow += {
 			{
 			if ( ${msg.version} == 10 )
 				BifEvent::generate_mysql_server_version(connection()->bro_analyzer(),
-														connection()->bro_analyzer()->Conn(),
-														bytestring_to_val(${msg.handshake10.server_version}));
+				                                        connection()->bro_analyzer()->Conn(),
+				                                        new StringVal(c_str(${msg.handshake10.server_version})));
 			if ( ${msg.version} == 9 )
 				BifEvent::generate_mysql_server_version(connection()->bro_analyzer(),
-														connection()->bro_analyzer()->Conn(),
-														bytestring_to_val(${msg.handshake9.server_version}));
+				                                        connection()->bro_analyzer()->Conn(),
+				                                        new StringVal(c_str(${msg.handshake9.server_version})));
 			}
 		return true;
 		%}
@@ -26,12 +26,12 @@ refine flow MySQL_Flow += {
 			{
 			if ( ${msg.version} == 10 )
 				BifEvent::generate_mysql_handshake(connection()->bro_analyzer(),
-									    		   connection()->bro_analyzer()->Conn(),
-													bytestring_to_val(${msg.v10_response.username}));
+				                                   connection()->bro_analyzer()->Conn(),
+				                                   new StringVal(c_str(${msg.v10_response.username})));
 			if ( ${msg.version} == 9 )
 				BifEvent::generate_mysql_handshake(connection()->bro_analyzer(),
-									    		   connection()->bro_analyzer()->Conn(),
-								    	    	   bytestring_to_val(${msg.v9_response.username}));
+				                                   connection()->bro_analyzer()->Conn(),
+				                                   new StringVal(c_str(${msg.v9_response.username})));
 			}
 		return true;
 		%}
@@ -40,9 +40,9 @@ refine flow MySQL_Flow += {
 		%{
 		if ( mysql_command_request )
 			BifEvent::generate_mysql_command_request(connection()->bro_analyzer(),
-													 connection()->bro_analyzer()->Conn(),
-													 ${msg.command},
-													 bytestring_to_val(${msg.arg}));
+			                                         connection()->bro_analyzer()->Conn(),
+			                                         ${msg.command},
+			                                         bytestring_to_val(${msg.arg}));
 		return true;
 		%}
 
@@ -50,9 +50,9 @@ refine flow MySQL_Flow += {
 		%{
 		if ( mysql_error )
 			BifEvent::generate_mysql_error(connection()->bro_analyzer(),
-										   connection()->bro_analyzer()->Conn(),
-										   ${msg.code},
-										   bytestring_to_val(${msg.msg}));
+			                               connection()->bro_analyzer()->Conn(),
+			                               ${msg.code},
+			                               bytestring_to_val(${msg.msg}));
 		return true;
 		%}
 
@@ -60,17 +60,48 @@ refine flow MySQL_Flow += {
 		%{
 		if ( mysql_ok )
 			BifEvent::generate_mysql_ok(connection()->bro_analyzer(),
-										connection()->bro_analyzer()->Conn(),
-										${msg.rows});
+			                            connection()->bro_analyzer()->Conn(),
+			                            ${msg.rows});
 		return true;
 		%}
 
 	function proc_resultset(msg: Resultset): bool
 		%{
-		if ( mysql_ok )
-			BifEvent::generate_mysql_ok(connection()->bro_analyzer(),
-										connection()->bro_analyzer()->Conn(),
-										${msg.rows}->size());
+		if ( connection()->get_results_seen() == 1 )
+			{
+			// This is a bit fake...
+			if ( mysql_ok )
+				BifEvent::generate_mysql_ok(connection()->bro_analyzer(),
+				                            connection()->bro_analyzer()->Conn(),
+				                            0);
+			}
+
+		if ( ${msg.is_eof} )
+			return true;
+
+		if ( ! mysql_result_row )
+			return true;
+
+		auto vt = internal_type("string_vec")->AsVectorType();
+		auto vv = new VectorVal(vt);
+
+		auto& bstring = ${msg.row.first_field.val};
+		auto ptr = reinterpret_cast<const char*>(bstring.data());
+		vv->Assign(vv->Size(), new StringVal(bstring.length(), ptr));
+
+		auto& fields = *${msg.row.fields};
+
+		for ( auto& f : fields )
+			{
+			auto& bstring = f->val();
+			auto ptr = reinterpret_cast<const char*>(bstring.data());
+			vv->Assign(vv->Size(), new StringVal(bstring.length(), ptr));
+			}
+
+		BifEvent::generate_mysql_result_row(connection()->bro_analyzer(),
+		                                    connection()->bro_analyzer()->Conn(),
+		                                    vv);
+
 		return true;
 		%}
 

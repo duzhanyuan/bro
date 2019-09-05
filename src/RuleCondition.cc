@@ -1,4 +1,4 @@
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "RuleCondition.h"
 #include "analyzer/protocol/tcp/TCP.h"
@@ -93,7 +93,7 @@ bool RuleConditionPayloadSize::DoMatch(Rule* rule, RuleEndpointState* state,
 		// We are interested in the first non-empty chunk.
 		return false;
 
-	uint32 payload_size = uint32(state->PayloadSize());
+	uint32_t payload_size = uint32_t(state->PayloadSize());
 
 	switch ( comp ) {
 	case RULE_EQ:
@@ -162,21 +162,27 @@ bool RuleConditionEval::DoMatch(Rule* rule, RuleEndpointState* state,
 		return id->ID_Val()->AsBool();
 
 	// Call function with a signature_state value as argument.
-	val_list args;
-	args.append(rule_matcher->BuildRuleStateValue(rule, state));
+	val_list args(2);
+	args.push_back(rule_matcher->BuildRuleStateValue(rule, state));
 
 	if ( data )
-		args.append(new StringVal(len, (const char*) data));
+		args.push_back(new StringVal(len, (const char*) data));
 	else
-		args.append(new StringVal(""));
+		args.push_back(val_mgr->GetEmptyString());
 
 	bool result = 0;
 
 	try
 		{
 		Val* val = id->ID_Val()->AsFunc()->Call(&args);
-		result = val->AsBool();
-		Unref(val);
+
+		if ( val )
+			{
+			result = val->AsBool();
+			Unref(val);
+			}
+		else
+			result = false;
 		}
 
 	catch ( InterpreterException& e )

@@ -4,8 +4,18 @@
 #define THREADING_FORMATTERS_JSON_H
 
 #include "../Formatter.h"
+#include "3rdparty/json.hpp"
+#include "3rdparty/fifo_map.hpp"
+
 
 namespace threading { namespace formatter {
+
+// Define a class for use with the json library that orders the keys in the same order that
+// they were inserted. By default, the json library orders them alphabetically and we don't
+// want it like that.
+template<class K, class V, class compare, class A>
+using json_fifo_map = nlohmann::fifo_map<K, V, nlohmann::fifo_map_compare<K>, A>;
+using ZeekJson = nlohmann::basic_json<json_fifo_map>;
 
 /**
   * A thread-safe class for converting values into a JSON representation
@@ -20,16 +30,17 @@ public:
 		};
 
 	JSON(threading::MsgThread* t, TimeFormat tf);
-	virtual ~JSON();
+	~JSON() override;
 
-	virtual bool Describe(ODesc* desc, threading::Value* val, const string& name = "") const;
-	virtual bool Describe(ODesc* desc, int num_fields, const threading::Field* const * fields,
-	                      threading::Value** vals) const;
-	virtual threading::Value* ParseValue(const string& s, const string& name, TypeTag type, TypeTag subtype = TYPE_ERROR) const;
-
-	void SurroundingBraces(bool use_braces);
+	bool Describe(ODesc* desc, threading::Value* val, const string& name = "") const override;
+	bool Describe(ODesc* desc, int num_fields, const threading::Field* const * fields,
+	                      threading::Value** vals) const override;
+	threading::Value* ParseValue(const string& s, const string& name, TypeTag type, TypeTag subtype = TYPE_ERROR) const override;
 
 private:
+
+	ZeekJson BuildJSON(Value* val, const string& name = "") const;
+
 	TimeFormat timestamps;
 	bool surrounding_braces;
 };

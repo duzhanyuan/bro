@@ -10,7 +10,7 @@ class PriorityQueue;
 
 class PQ_Element {
 public:
-	PQ_Element(double t)	{ time = t; offset = -1; }
+	explicit PQ_Element(double t)	{ time = t; offset = -1; }
 	virtual ~PQ_Element()	{ }
 
 	double Time() const	{ return time; }
@@ -28,7 +28,7 @@ protected:
 
 class PriorityQueue {
 public:
-	PriorityQueue(int initial_size = 16);
+	explicit PriorityQueue(int initial_size = 16);
 	~PriorityQueue();
 
 	// Returns the top of queue, or nil if the queue is empty.
@@ -54,7 +54,7 @@ public:
 
 	int Size() const	{ return heap_size; }
 	int PeakSize() const	{ return peak_heap_size; }
-	uint64 CumulativeNum() const { return cumulative_num; }
+	uint64_t CumulativeNum() const { return cumulative_num; }
 
 protected:
 	int Resize(int new_size);
@@ -94,7 +94,7 @@ protected:
 	int heap_size;
 	int peak_heap_size;
 	int max_heap_size;
-	uint64 cumulative_num;
+	uint64_t cumulative_num;
 };
 
 #endif

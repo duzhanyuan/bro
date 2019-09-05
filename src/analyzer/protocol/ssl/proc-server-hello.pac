@@ -1,5 +1,5 @@
 	function proc_server_hello(
-					version : uint16, ts : double,
+					version : uint16, v2 : bool,
 					server_random : bytestring,
 					session_id : uint8[],
 					cipher_suites16 : uint16[],
@@ -21,9 +21,13 @@
 			else
 				std::transform(cipher_suites24->begin(), cipher_suites24->end(), std::back_inserter(*ciphers), to_int());
 
+			uint32 ts = 0;
+			if ( v2 == 0 && server_random.length() >= 4 )
+				ts = ntohl(*((uint32*)server_random.data()));
+
 			BifEvent::generate_ssl_server_hello(bro_analyzer(),
 							bro_analyzer()->Conn(),
-							version, ts, new StringVal(server_random.length(),
+							version, record_version(), ts, new StringVal(server_random.length(),
 							(const char*) server_random.data()),
 							to_string_val(session_id),
 							ciphers->size()==0 ? 0 : ciphers->at(0), comp_method);

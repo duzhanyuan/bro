@@ -7,16 +7,17 @@
 #include <string>
 #include <utility>
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "analyzer/Component.h"
 #include "file_analysis/Component.h"
 #include "iosource/Component.h"
 #include "logging/WriterBackend.h"
 
-// We allow to override this externally for testing purposes.
-#ifndef BRO_PLUGIN_API_VERSION
-#define BRO_PLUGIN_API_VERSION 5
-#endif
+// Increase this when making incompatible changes to the plugin API. Note
+// that the constant is never used in C code. It's picked up on by CMake.
+#define BRO_PLUGIN_API_VERSION 7
+
+#define BRO_PLUGIN_BRO_VERSION BRO_VERSION_FUNCTION
 
 class ODesc;
 class Func;
@@ -47,6 +48,7 @@ enum HookType {
 	HOOK_SETUP_ANALYZER_TREE,	//< Activates Plugin::HookAddToAnalyzerTree
 	HOOK_LOG_INIT,			//< Activates Plugin::HookLogInit
 	HOOK_LOG_WRITE,			//< Activates Plugin::HookLogWrite
+	HOOK_REPORTER,			//< Activates Plugin::HookReporter
 
 	// Meta hooks.
 	META_HOOK_PRE,			//< Activates Plugin::MetaHookPre().
@@ -65,18 +67,24 @@ extern const char* hook_name(HookType h);
  * Helper class to capture a plugin's version.
  * */
 struct VersionNumber {
-	int major; //< Major version number;
-	int minor; //< Minor version number;
+	int major; //< Major version number.
+	int minor; //< Minor version number.
+	int patch; //< Patch version number (available since Zeek 3.0).
 
 	/**
 	 *  Constructor.
 	 */
-	VersionNumber()	{ major = minor = -1; }
+	VersionNumber()	{
+		// Major and minor versions are required.
+		major = minor = -1;
+		// Patch version is optional, and set to 0 if not manually set.
+		patch = 0;
+	}
 
 	/**
 	 *  Returns true if the version is set to a non-negative value.
 	 */
-	operator bool() const { return major >= 0 && minor >= 0; }
+	explicit operator bool() const { return major >= 0 && minor >= 0 && patch >= 0; }
 };
 
 /**
@@ -93,16 +101,21 @@ public:
 	// strong hint.). The attribute seems generally available.
 	inline Configuration() __attribute__((always_inline));
 
+        /**
+         * One can assign BRO_PLUGIN_BRO_VERSION to this to catch
+         * version mismatches at link(!) time.
+         */
+	const char* (*bro_version)();
+
 private:
 	friend class Plugin;
-	int api_version;	// Current BRO_PLUGIN_API_VERSION. Automatically set.
 };
 
 inline Configuration::Configuration()
 		{
 		name = "";
 		description = "";
-		api_version = BRO_PLUGIN_API_VERSION;
+		bro_version = BRO_PLUGIN_BRO_VERSION;
 		}
 
 /**
@@ -166,7 +179,7 @@ public:
 	 */
 	enum Type {
 		BOOL, DOUBLE, EVENT, FRAME, FUNC, FUNC_RESULT, INT, STRING, VAL,
-		VAL_LIST, VOID, VOIDP, WRITER_INFO, CONN, THREAD_FIELDS
+		VAL_LIST, VOID, VOIDP, WRITER_INFO, CONN, THREAD_FIELDS, LOCATION
 	};
 
 	/**
@@ -243,6 +256,11 @@ public:
 	 * Constructor with a threading field argument.
 	 */
 	explicit HookArgument(const std::pair<int, const threading::Field* const*> fpair)	{ type = THREAD_FIELDS; tfields = fpair; }
+
+	/**
+	 * Constructor with a location argument.
+	 */
+	explicit HookArgument(const Location* location)	{ type = LOCATION; arg.loc = location; }
 
 	/**
 	 * Returns the value for a boolen argument. The argument's type must
@@ -354,6 +372,7 @@ private:
 		const val_list* vals;
 		const void* voidp;
 		const logging::WriterBackend::WriterInfo* winfo;
+		const Location* loc;
 	} arg;
 
 	// Outside union because these have dtors.
@@ -396,6 +415,13 @@ public:
 	typedef std::list<Component *> component_list;
 	typedef std::list<BifItem> bif_item_list;
 	typedef std::list<std::pair<HookType, int> > hook_list;
+
+	/**
+	 * The different types of @loads supported by HookLoadFile.
+	 */
+	enum LoadType {
+		SCRIPT, SIGNATURES, PLUGIN
+	};
 
 	/**
 	 * Constructor.
@@ -441,15 +467,6 @@ public:
 	 * string.
 	 **/
 	const std::string& PluginPath() const;
-
-	/**
-	 * Returns the internal version of the Bro API that this plugin
-	 * relies on. Only plugins that match Bro's current API version can
-	 * be used. For statically compiled plugins this is automatically the
-	 * case, but dynamically loaded plugins may cause a mismatch if they
-	 * were compiled for a different Bro version.
-	 */
-	int APIVersion() const;
 
 	/**
 	 * Returns a list of all components the plugin provides.
@@ -614,10 +631,15 @@ protected:
 	 * script directives. The hook can take over the file, in which case
 	 * Bro will not further process it otherwise.
 	 *
-	 * @param file The filename to be loaded, including extension.
+	 * @param type The type of load encountered: script load, signatures load,
+	 *             or plugin load.
 	 *
-	 * @param ext The extension of the filename. This is provided
-	 * separately just for convenience. The dot is excluded.
+	 * @param file The filename that was passed to @load. Only includes
+	 *             an extension if it was given in @load.
+	 *
+	 * @param resolved The file or directory name Bro resolved from
+	 *                 the given path and is going to load. Empty string
+	 *                 if Bro was not able to resolve a path.
 	 *
 	 * @return 1 if the plugin took over the file and loaded it
 	 * successfully; 0 if the plugin took over the file but had trouble
@@ -625,7 +647,7 @@ protected:
 	 * have printed an error message); and -1 if the plugin wasn't
 	 * interested in the file at all.
 	 */
-	virtual int HookLoadFile(const std::string& file, const std::string& ext);
+	virtual int HookLoadFile(const LoadType type, const std::string& file, const std::string& resolved);
 
 	/**
 	 * Hook into executing a script-level function/event/hook. Whenever
@@ -771,6 +793,39 @@ protected:
 	                          int num_fields,
 	                          const threading::Field* const* fields,
 	                          threading::Value** vals);
+
+	/**
+	 * Hook into reporting. This method will be called for each reporter call
+	 * made; this includes weirds. The method cannot manipulate the data at
+	 * the current time; however it is possible to prevent script-side events
+	 * from being called by returning false.
+	 *
+	 * @param prefix The prefix passed by the reporter framework
+	 *
+	 * @param event The event to be called
+	 *
+	 * @param conn The associated connection
+	 *
+	 * @param addl Additional Bro values; typically will be passed to the event
+	 *             by the reporter framework.
+	 *
+	 * @param location True if event expects location information
+	 *
+	 * @param location1 First location
+	 *
+	 * @param location2 Second location
+	 *
+	 * @param time True if event expects time information
+	 *
+	 * @param message Message supplied by the reporter framework
+	 *
+	 * @return true if event should be called by the reporter framework, false
+	 *         if the event call should be skipped
+	 */
+	virtual bool HookReporter(const std::string& prefix, const EventHandlerPtr event,
+	                          const Connection* conn, const val_list* addl, bool location,
+	                          const Location* location1, const Location* location2,
+	                          bool time, const std::string& message);
 
 	// Meta hooks.
 

@@ -17,9 +17,11 @@ enum dce_rpc_ptype {
 	DCE_RPC_BIND_NAK,
 	DCE_RPC_ALTER_CONTEXT,
 	DCE_RPC_ALTER_CONTEXT_RESP,
+	DCE_RPC_AUTH3,
 	DCE_RPC_SHUTDOWN,
 	DCE_RPC_CO_CANCEL,
 	DCE_RPC_ORPHANED,
+	DCE_RPC_RTS,
 };
 
 type uuid = bytestring &length = 16;
@@ -49,7 +51,7 @@ type NDR_Format = record {
 };
 
 type DCE_RPC_Header(is_orig: bool) = record {
-	rpc_vers       : uint8 &check(rpc_vers == 5);
+	rpc_vers       : uint8 &enforce(rpc_vers == 5);
 	rpc_vers_minor : uint8;
 	PTYPE          : uint8;
 	pfc_flags      : uint8;
@@ -69,7 +71,7 @@ type Syntax = record {
 	ver_minor : uint16;
 };
 
-type ContextRequest = record {
+type ContextRequest(ptype: uint8) = record {
 	id                : uint16;
 	num_syntaxes      : uint8;
 	reserved          : padding[1];
@@ -83,11 +85,11 @@ type ContextReply = record {
 	syntax            : Syntax;
 };
 
-type ContextList(is_request: bool) = record {
+type ContextList(is_request: bool, ptype: uint8) = record {
 	num_contexts   : uint8;
 	reserved       : padding[3];
 	req_reply      : case is_request of {
-		true  -> request_contexts : ContextRequest[num_contexts];
+		true  -> request_contexts : ContextRequest(ptype)[num_contexts];
 		false -> reply_contexts   : ContextReply[num_contexts];
 	};
 };
@@ -96,7 +98,7 @@ type DCE_RPC_Bind = record {
 	max_xmit_frag  : uint16;
 	max_recv_frag  : uint16;
 	assoc_group_id : uint32;
-	context_list   : ContextList(1);
+	context_list   : ContextList(1, DCE_RPC_BIND);
 };
 
 type DCE_RPC_Bind_Ack = record {
@@ -106,7 +108,7 @@ type DCE_RPC_Bind_Ack = record {
 	sec_addr_length : uint16;
 	sec_addr        : bytestring &length=sec_addr_length;
 	pad             : padding align 4;
-	contexts        : ContextList(0);
+	contexts        : ContextList(0, DCE_RPC_BIND_ACK);
 };
 
 type DCE_RPC_Request(h: DCE_RPC_Header) = record {
@@ -134,15 +136,17 @@ type DCE_RPC_AlterContext = record {
 	max_xmit_frag  : uint16;
 	max_recv_frag  : uint16;
 	assoc_group_id : uint32;
-	contexts       : ContextList(0);
+	context_list   : ContextList(1, DCE_RPC_ALTER_CONTEXT);
 };
 
 type DCE_RPC_AlterContext_Resp = record {
-	max_xmit_frag  : uint16;
-	max_recv_frag  : uint16;
-	assoc_group_id : uint32;
-	sec_addr_len   : uint16;
-	contexts       : ContextList(0);
+	max_xmit_frag   : uint16;
+	max_recv_frag   : uint16;
+	assoc_group_id  : uint32;
+	sec_addr_length : uint16;
+	sec_addr        : bytestring &length=sec_addr_length;
+	pad             : padding align 4;
+	contexts        : ContextList(0, DCE_RPC_ALTER_CONTEXT_RESP);
 };
 
 type DCE_RPC_Body(header: DCE_RPC_Header) = case header.PTYPE of {
@@ -150,9 +154,8 @@ type DCE_RPC_Body(header: DCE_RPC_Header) = case header.PTYPE of {
 	DCE_RPC_BIND_ACK           -> bind_ack      : DCE_RPC_Bind_Ack;
 	DCE_RPC_REQUEST            -> request       : DCE_RPC_Request(header);
 	DCE_RPC_RESPONSE           -> response      : DCE_RPC_Response;
-	# TODO: Something about the two following structures isn't being handled correctly.
-	#DCE_RPC_ALTER_CONTEXT      -> alter_context : DCE_RPC_AlterContext;
-	#DCE_RPC_ALTER_CONTEXT_RESP -> alter_resp    : DCE_RPC_AlterContext_Resp;
+	DCE_RPC_ALTER_CONTEXT      -> alter_context : DCE_RPC_AlterContext;
+	DCE_RPC_ALTER_CONTEXT_RESP -> alter_resp    : DCE_RPC_AlterContext_Resp;
 	default                    -> other         : bytestring &restofdata;
 };
 
@@ -180,9 +183,11 @@ flow DCE_RPC_Flow(is_orig: bool) {
 	# Fragment reassembly.
 	function reassemble_fragment(header: DCE_RPC_Header, frag: bytestring): bool
 		%{
+		auto it = fb.find(${header.call_id});
+
 		if ( ${header.firstfrag} )
 			{
-			if ( fb.count(${header.call_id}) > 0 )
+			if ( it != fb.end() )
 				{
 				// We already had a first frag earlier.
 				reporter->Weird(connection()->bro_analyzer()->Conn(),
@@ -199,9 +204,11 @@ flow DCE_RPC_Flow(is_orig: bool) {
 			else
 				{
 				// first frag, but not last so we start a flowbuffer
-				fb[${header.call_id}] = std::unique_ptr<FlowBuffer>(new FlowBuffer());
-				fb[${header.call_id}]->NewFrame(0, true);
-				fb[${header.call_id}]->BufferData(frag.begin(), frag.end());
+				auto it = fb.emplace(${header.call_id},
+				                     std::unique_ptr<FlowBuffer>(new FlowBuffer()));
+				auto& flowbuf = it.first->second;
+				flowbuf->NewFrame(0, true);
+				flowbuf->BufferData(frag.begin(), frag.end());
 
 				if ( fb.size() > BifConst::DCE_RPC::max_cmd_reassembly )
 					{
@@ -210,7 +217,7 @@ flow DCE_RPC_Flow(is_orig: bool) {
 					connection()->bro_analyzer()->SetSkip(true);
 					}
 
-				if ( fb[${header.call_id}]->data_length() > (int)BifConst::DCE_RPC::max_frag_data )
+				if ( flowbuf->data_length() > (int)BifConst::DCE_RPC::max_frag_data )
 					{
 					reporter->Weird(connection()->bro_analyzer()->Conn(),
 					                "too_much_dce_rpc_fragment_data");
@@ -220,12 +227,13 @@ flow DCE_RPC_Flow(is_orig: bool) {
 				return false;
 				}
 			}
-		else if ( fb.count(${header.call_id}) > 0 )
+		else if ( it != fb.end() )
 			{
 			// not the first frag, but we have a flow buffer so add to it
-			fb[${header.call_id}]->BufferData(frag.begin(), frag.end());
+			auto& flowbuf = it->second;
+			flowbuf->BufferData(frag.begin(), frag.end());
 
-			if ( fb[${header.call_id}]->data_length() > (int)BifConst::DCE_RPC::max_frag_data )
+			if ( flowbuf->data_length() > (int)BifConst::DCE_RPC::max_frag_data )
 				{
 				reporter->Weird(connection()->bro_analyzer()->Conn(),
 				                "too_much_dce_rpc_fragment_data");
@@ -247,12 +255,14 @@ flow DCE_RPC_Flow(is_orig: bool) {
 	function reassembled_body(h: DCE_RPC_Header, body: bytestring): const_bytestring
 		%{
 		const_bytestring bd = body;
+		auto it = fb.find(${h.call_id});
 
-		if ( fb.count(${h.call_id}) > 0 )
-			{
-			bd = const_bytestring(fb[${h.call_id}]->begin(), fb[${h.call_id}]->end());
-			fb.erase(${h.call_id});
-			}
+		if ( it == fb.end() )
+			return bd;
+
+		auto& flowbuf = it->second;
+		bd = const_bytestring(flowbuf->begin(), flowbuf->end());
+		fb.erase(it);
 
 		return bd;
 		%}

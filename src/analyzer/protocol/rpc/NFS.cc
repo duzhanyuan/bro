@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <vector>
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "NetVar.h"
 #include "XDR.h"
@@ -17,9 +17,9 @@ using namespace analyzer::rpc;
 int NFS_Interp::RPC_BuildCall(RPC_CallInfo* c, const u_char*& buf, int& n)
 	{
 	if ( c->Program() != 100003 )
-		Weird(fmt("bad_RPC_program (%d)", c->Program()));
+		Weird("bad_RPC_program", fmt("%d", c->Program()));
 
-	uint32 proc = c->Proc();
+	uint32_t proc = c->Proc();
 	// The call arguments, depends on the call type obviously ...
 	Val *callarg = 0;
 
@@ -29,6 +29,10 @@ int NFS_Interp::RPC_BuildCall(RPC_CallInfo* c, const u_char*& buf, int& n)
 
 	case BifEnum::NFS3::PROC_GETATTR:
 		callarg = nfs3_fh(buf, n);
+		break;
+
+	case BifEnum::NFS3::PROC_SETATTR:
+		callarg = nfs3_sattrargs(buf, n);
 		break;
 
 	case BifEnum::NFS3::PROC_LOOKUP:
@@ -41,6 +45,14 @@ int NFS_Interp::RPC_BuildCall(RPC_CallInfo* c, const u_char*& buf, int& n)
 
 	case BifEnum::NFS3::PROC_READLINK:
 		callarg = nfs3_fh(buf, n);
+		break;
+
+	case BifEnum::NFS3::PROC_SYMLINK:
+		callarg = nfs3_symlinkargs(buf, n);
+		break;
+
+	case BifEnum::NFS3::PROC_LINK:
+		callarg = nfs3_linkargs(buf, n);
 		break;
 
 	case BifEnum::NFS3::PROC_WRITE:
@@ -91,7 +103,7 @@ int NFS_Interp::RPC_BuildCall(RPC_CallInfo* c, const u_char*& buf, int& n)
 			n = 0;
 			}
 		else
-			Weird(fmt("unknown_NFS_request(%u)", proc));
+			Weird("unknown_NFS_request", fmt("%u", proc));
 
 		// Return 1 so that replies to unprocessed calls will still
 		// be processed, and the return status extracted.
@@ -135,9 +147,9 @@ int NFS_Interp::RPC_BuildReply(RPC_CallInfo* c, BifEnum::rpc_status rpc_status,
 
 	if ( nfs_reply_status )
 		{
-		val_list* vl = event_common_vl(c, rpc_status, nfs_status,
-					       start_time, last_time, reply_len);
-		analyzer->ConnectionEvent(nfs_reply_status, vl);
+		auto vl = event_common_vl(c, rpc_status, nfs_status,
+					       start_time, last_time, reply_len, 0);
+		analyzer->ConnectionEventFast(nfs_reply_status, std::move(vl));
 		}
 
 	if ( ! rpc_success )
@@ -159,6 +171,11 @@ int NFS_Interp::RPC_BuildReply(RPC_CallInfo* c, BifEnum::rpc_status rpc_status,
 		event = nfs_proc_getattr;
 		break;
 
+	case BifEnum::NFS3::PROC_SETATTR:
+		reply = nfs3_sattr_reply(buf, n, nfs_status);
+		event = nfs_proc_sattr;
+		break;
+
 	case BifEnum::NFS3::PROC_LOOKUP:
 		reply = nfs3_lookup_reply(buf, n, nfs_status);
 		event = nfs_proc_lookup;
@@ -174,6 +191,16 @@ int NFS_Interp::RPC_BuildReply(RPC_CallInfo* c, BifEnum::rpc_status rpc_status,
 	case BifEnum::NFS3::PROC_READLINK:
 		reply = nfs3_readlink_reply(buf, n, nfs_status);
 		event = nfs_proc_readlink;
+		break;
+
+	case BifEnum::NFS3::PROC_SYMLINK:
+		reply = nfs3_newobj_reply(buf, n, nfs_status);
+		event = nfs_proc_symlink;
+		break;
+
+	case BifEnum::NFS3::PROC_LINK:
+		reply = nfs3_link_reply(buf, n, nfs_status);
+		event = nfs_proc_link;
 		break;
 
 	case BifEnum::NFS3::PROC_WRITE:
@@ -223,7 +250,7 @@ int NFS_Interp::RPC_BuildReply(RPC_CallInfo* c, BifEnum::rpc_status rpc_status,
 			// Otherwise DeliverRPC would complain about
 			// excess_RPC.
 			n = 0;
-			reply = new EnumVal(c->Proc(), BifType::Enum::NFS3::proc_t);
+			reply = BifType::Enum::NFS3::proc_t->GetVal(c->Proc());
 			event = nfs_proc_not_implemented;
 			}
 		else
@@ -247,18 +274,18 @@ int NFS_Interp::RPC_BuildReply(RPC_CallInfo* c, BifEnum::rpc_status rpc_status,
 	// optional and all are set to 0 ...
 	if ( event )
 		{
-		val_list* vl = event_common_vl(c, rpc_status, nfs_status,
-					start_time, last_time, reply_len);
-
 		Val *request = c->TakeRequestVal();
 
+		auto vl = event_common_vl(c, rpc_status, nfs_status,
+					start_time, last_time, reply_len, (bool)request + (bool)reply);
+
 		if ( request )
-			vl->append(request);
+			vl.push_back(request);
 
 		if ( reply )
-			vl->append(reply);
+			vl.push_back(reply);
 
-		analyzer->ConnectionEvent(event, vl);
+		analyzer->ConnectionEventFast(event, std::move(vl));
 		}
 	else
 		Unref(reply);
@@ -284,42 +311,42 @@ StringVal* NFS_Interp::nfs3_file_data(const u_char*& buf, int& n, uint64_t offse
 	data_n = min(data_n, size);
 	data_n = min(data_n, int(BifConst::NFS3::return_data_max));
 
-	if ( data_n > 0 )
+	if ( data && data_n > 0 )
 		return new StringVal(new BroString(data, data_n, 0));
 
 	return 0;
 	}
 
-val_list* NFS_Interp::event_common_vl(RPC_CallInfo *c, BifEnum::rpc_status rpc_status,
+val_list NFS_Interp::event_common_vl(RPC_CallInfo *c, BifEnum::rpc_status rpc_status,
 				      BifEnum::NFS3::status_t nfs_status,
 				      double rep_start_time,
-				      double rep_last_time, int reply_len)
+				      double rep_last_time, int reply_len, int extra_elements)
 	{
 	// Returns a new val_list that already has a conn_val, and nfs3_info.
 	// These are the first parameters for each nfs_* event ...
-	val_list *vl = new val_list;
-	vl->append(analyzer->BuildConnVal());
+	val_list vl(2 + extra_elements);
+	vl.push_back(analyzer->BuildConnVal());
 	VectorVal* auxgids = new VectorVal(internal_type("index_vec")->AsVectorType());
 
 	for ( size_t i = 0; i < c->AuxGIDs().size(); ++i )
-		auxgids->Assign(i, new Val(c->AuxGIDs()[i], TYPE_COUNT));
+		auxgids->Assign(i, val_mgr->GetCount(c->AuxGIDs()[i]));
 
 	RecordVal *info = new RecordVal(BifType::Record::NFS3::info_t);
-	info->Assign(0, new EnumVal(rpc_status, BifType::Enum::rpc_status));
-	info->Assign(1, new EnumVal(nfs_status, BifType::Enum::NFS3::status_t));
+	info->Assign(0, BifType::Enum::rpc_status->GetVal(rpc_status));
+	info->Assign(1, BifType::Enum::NFS3::status_t->GetVal(nfs_status));
 	info->Assign(2, new Val(c->StartTime(), TYPE_TIME));
 	info->Assign(3, new Val(c->LastTime()-c->StartTime(), TYPE_INTERVAL));
-	info->Assign(4, new Val(c->RPCLen(), TYPE_COUNT));
+	info->Assign(4, val_mgr->GetCount(c->RPCLen()));
 	info->Assign(5, new Val(rep_start_time, TYPE_TIME));
 	info->Assign(6, new Val(rep_last_time-rep_start_time, TYPE_INTERVAL));
-	info->Assign(7, new Val(reply_len, TYPE_COUNT));
-	info->Assign(8, new Val(c->Uid(), TYPE_COUNT));
-	info->Assign(9, new Val(c->Gid(), TYPE_COUNT));
-	info->Assign(10, new Val(c->Stamp(), TYPE_COUNT));
+	info->Assign(7, val_mgr->GetCount(reply_len));
+	info->Assign(8, val_mgr->GetCount(c->Uid()));
+	info->Assign(9, val_mgr->GetCount(c->Gid()));
+	info->Assign(10, val_mgr->GetCount(c->Stamp()));
 	info->Assign(11, new StringVal(c->MachineName()));
 	info->Assign(12, auxgids);
 
-	vl->append(info);
+	vl.push_back(info);
 	return vl;
 	}
 
@@ -332,6 +359,56 @@ StringVal* NFS_Interp::nfs3_fh(const u_char*& buf, int& n)
 		return 0;
 
 	return new StringVal(new BroString(fh, fh_n, 0));
+	}
+
+
+RecordVal* NFS_Interp::nfs3_sattr(const u_char*& buf, int& n)
+	{
+	RecordVal* attrs = new RecordVal(BifType::Record::NFS3::sattr_t);
+
+	attrs->Assign(0, 0); // mode
+	int mode_set_it =  extract_XDR_uint32(buf, n);
+	if ( mode_set_it )
+		attrs->Assign(0, ExtractUint32(buf, n)); // mode
+
+	attrs->Assign(1, 0); // uid
+	int uid_set_it =  extract_XDR_uint32(buf, n);
+	if ( uid_set_it )
+		attrs->Assign(1, ExtractUint32(buf, n)); // uid
+
+	attrs->Assign(2, 0); // gid
+	int gid_set_it =  extract_XDR_uint32(buf, n);
+	if ( gid_set_it )
+		attrs->Assign(2, ExtractUint32(buf, n)); // gid
+
+	attrs->Assign(3, 0); // size
+	int size_set_it =  extract_XDR_uint32(buf, n);
+	if ( size_set_it )
+		attrs->Assign(3, ExtractTime(buf, n));	 // size
+
+	attrs->Assign(4, nfs3_time_how(buf, n)); // time_how
+
+	attrs->Assign(5, nfs3_time_how(buf, n)); // time_how
+
+	return attrs;
+	}
+
+RecordVal* NFS_Interp::nfs3_sattr_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status)
+	{
+	RecordVal* rep = new RecordVal(BifType::Record::NFS3::sattr_reply_t);
+
+	if ( status == BifEnum::NFS3::NFS3ERR_OK )
+		{
+		rep->Assign(0, nfs3_pre_op_attr(buf, n));
+		rep->Assign(1, nfs3_post_op_attr(buf, n));
+		}
+	else
+		{
+		rep->Assign(1, 0);
+		rep->Assign(2, 0);
+		}
+
+	return rep;
 	}
 
 RecordVal* NFS_Interp::nfs3_fattr(const u_char*& buf, int& n)
@@ -356,10 +433,16 @@ RecordVal* NFS_Interp::nfs3_fattr(const u_char*& buf, int& n)
 	return attrs;
 	}
 
+EnumVal* NFS_Interp::nfs3_time_how(const u_char*& buf, int& n)
+	{
+	BifEnum::NFS3::time_how_t t = (BifEnum::NFS3::time_how_t)extract_XDR_uint32(buf, n);
+	return BifType::Enum::NFS3::time_how_t->GetVal(t);
+	}
+
 EnumVal* NFS_Interp::nfs3_ftype(const u_char*& buf, int& n)
 	{
 	BifEnum::NFS3::file_type_t t = (BifEnum::NFS3::file_type_t)extract_XDR_uint32(buf, n);
-	return new EnumVal(t, BifType::Enum::NFS3::file_type_t);
+	return BifType::Enum::NFS3::file_type_t->GetVal(t);
 	}
 
 RecordVal* NFS_Interp::nfs3_wcc_attr(const u_char*& buf, int& n)
@@ -392,6 +475,16 @@ RecordVal *NFS_Interp::nfs3_diropargs(const u_char*& buf, int& n)
 	diropargs->Assign(1, nfs3_filename(buf, n));
 
 	return diropargs;
+	}
+
+RecordVal* NFS_Interp::nfs3_symlinkdata(const u_char*& buf, int& n)
+	{
+	RecordVal* symlinkdata = new RecordVal(BifType::Record::NFS3::symlinkdata_t);
+
+	symlinkdata->Assign(0, nfs3_sattr(buf, n));
+	symlinkdata->Assign(1, nfs3_nfspath(buf, n));
+
+	return symlinkdata;
 	}
 
 RecordVal *NFS_Interp::nfs3_renameopargs(const u_char*& buf, int& n)
@@ -438,7 +531,7 @@ RecordVal* NFS_Interp::nfs3_pre_op_attr(const u_char*& buf, int& n)
 EnumVal *NFS_Interp::nfs3_stable_how(const u_char*& buf, int& n)
 	{
 	BifEnum::NFS3::stable_how_t stable = (BifEnum::NFS3::stable_how_t)extract_XDR_uint32(buf, n);
-	return new EnumVal(stable, BifType::Enum::NFS3::stable_how_t);
+	return BifType::Enum::NFS3::stable_how_t->GetVal(stable);
 	}
 
 RecordVal* NFS_Interp::nfs3_lookup_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status)
@@ -482,7 +575,7 @@ RecordVal* NFS_Interp::nfs3_read_reply(const u_char*& buf, int& n, BifEnum::NFS3
 
 		rep->Assign(0, nfs3_post_op_attr(buf, n));
 		bytes_read = extract_XDR_uint32(buf, n);
-		rep->Assign(1, new Val(bytes_read, TYPE_COUNT));
+		rep->Assign(1, val_mgr->GetCount(bytes_read));
 		rep->Assign(2, ExtractBool(buf, n));
 		rep->Assign(3, nfs3_file_data(buf, n, offset, bytes_read));
 		}
@@ -511,18 +604,64 @@ RecordVal* NFS_Interp::nfs3_readlink_reply(const u_char*& buf, int& n, BifEnum::
 	return rep;
 	}
 
+RecordVal* NFS_Interp::nfs3_link_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status)
+	{
+	RecordVal* rep = new RecordVal(BifType::Record::NFS3::link_reply_t);
+
+	if ( status == BifEnum::NFS3::NFS3ERR_OK )
+		{
+		rep->Assign(0, nfs3_post_op_attr(buf, n));
+
+		// wcc_data
+		rep->Assign(1, nfs3_pre_op_attr(buf, n));
+		rep->Assign(2, nfs3_post_op_attr(buf, n));
+		}
+
+	return rep;
+	}
+
+RecordVal* NFS_Interp::nfs3_symlinkargs(const u_char*& buf, int& n)
+	{
+	RecordVal* symlinkargs = new RecordVal(BifType::Record::NFS3::symlinkargs_t);
+
+	symlinkargs->Assign(0, nfs3_diropargs(buf, n));
+	symlinkargs->Assign(1, nfs3_symlinkdata(buf, n));
+
+	return symlinkargs;
+	}
+
+RecordVal* NFS_Interp::nfs3_sattrargs(const u_char*& buf, int& n)
+	{
+	RecordVal* sattrargs = new RecordVal(BifType::Record::NFS3::sattrargs_t);
+
+	sattrargs->Assign(0, nfs3_fh(buf, n));
+	sattrargs->Assign(1, nfs3_sattr(buf, n));
+
+	return sattrargs;
+	}
+
+RecordVal* NFS_Interp::nfs3_linkargs(const u_char*& buf, int& n)
+	{
+	RecordVal* linkargs = new RecordVal(BifType::Record::NFS3::linkargs_t);
+
+	linkargs->Assign(0, nfs3_fh(buf, n));
+	linkargs->Assign(1, nfs3_diropargs(buf, n));
+
+	return linkargs;
+	}
+
 RecordVal *NFS_Interp::nfs3_writeargs(const u_char*& buf, int& n)
 	{
 	uint32_t bytes;
 	uint64_t offset;
 	RecordVal *writeargs = new RecordVal(BifType::Record::NFS3::writeargs_t);
 
-	offset = extract_XDR_uint64(buf, n);
-	bytes = extract_XDR_uint32(buf, n);
-
 	writeargs->Assign(0, nfs3_fh(buf, n));
-	writeargs->Assign(1, new Val(offset, TYPE_COUNT));
-	writeargs->Assign(2, new Val(bytes, TYPE_COUNT));
+	offset = extract_XDR_uint64(buf, n);
+	writeargs->Assign(1, val_mgr->GetCount(offset));  // offset
+	bytes = extract_XDR_uint32(buf, n);
+	writeargs->Assign(2, val_mgr->GetCount(bytes));   // size
+
 	writeargs->Assign(3, nfs3_stable_how(buf, n));
 	writeargs->Assign(4, nfs3_file_data(buf, n, offset, bytes));
 
@@ -606,7 +745,7 @@ RecordVal* NFS_Interp::nfs3_readdirargs(bool isplus, const u_char*& buf, int&n)
 	{
 	RecordVal *args = new RecordVal(BifType::Record::NFS3::readdirargs_t);
 
-	args->Assign(0, new Val(isplus, TYPE_BOOL));
+	args->Assign(0, val_mgr->GetBool(isplus));
 	args->Assign(1, nfs3_fh(buf, n));
 	args->Assign(2, ExtractUint64(buf,n));	// cookie
 	args->Assign(3, ExtractUint64(buf,n));	// cookieverf
@@ -623,7 +762,7 @@ RecordVal* NFS_Interp::nfs3_readdir_reply(bool isplus, const u_char*& buf,
 	{
 	RecordVal *rep = new RecordVal(BifType::Record::NFS3::readdir_reply_t);
 
-	rep->Assign(0, new Val(isplus, TYPE_BOOL));
+	rep->Assign(0, val_mgr->GetBool(isplus));
 
 	if ( status == BifEnum::NFS3::NFS3ERR_OK )
 		{
@@ -665,12 +804,12 @@ RecordVal* NFS_Interp::nfs3_readdir_reply(bool isplus, const u_char*& buf,
 
 Val* NFS_Interp::ExtractUint32(const u_char*& buf, int& n)
 	{
-	return new Val(extract_XDR_uint32(buf, n), TYPE_COUNT);
+	return val_mgr->GetCount(extract_XDR_uint32(buf, n));
 	}
 
 Val* NFS_Interp::ExtractUint64(const u_char*& buf, int& n)
 	{
-	return new Val(extract_XDR_uint64(buf, n), TYPE_COUNT);
+	return val_mgr->GetCount(extract_XDR_uint64(buf, n));
 	}
 
 Val* NFS_Interp::ExtractTime(const u_char*& buf, int& n)
@@ -685,7 +824,7 @@ Val* NFS_Interp::ExtractInterval(const u_char*& buf, int& n)
 
 Val* NFS_Interp::ExtractBool(const u_char*& buf, int& n)
 	{
-	return new Val(extract_XDR_uint32(buf, n), TYPE_BOOL);
+	return val_mgr->GetBool(extract_XDR_uint32(buf, n));
 	}
 
 

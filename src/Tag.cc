@@ -9,9 +9,9 @@ Tag::Tag(EnumType* etype, type_t arg_type, subtype_t arg_subtype)
 
 	type = arg_type;
 	subtype = arg_subtype;
-	int64_t i = (int64)(type) | ((int64)subtype << 31);
+	int64_t i = (int64_t)(type) | ((int64_t)subtype << 31);
 	Ref(etype);
-	val = new EnumVal(i, etype);
+	val = etype->GetVal(i);
 	}
 
 Tag::Tag(EnumVal* arg_val)
@@ -21,7 +21,7 @@ Tag::Tag(EnumVal* arg_val)
 	val = arg_val;
 	Ref(val);
 
-	int64 i = val->InternalInt();
+	int64_t i = val->InternalInt();
 	type = i & 0xffffffff;
 	subtype = (i >> 31) & 0xffffffff;
 	}
@@ -85,7 +85,7 @@ EnumVal* Tag::AsEnumVal(EnumType* etype) const
 		{
 		assert(type == 0 && subtype == 0);
 		Ref(etype);
-		val = new EnumVal(0, etype);
+		val = etype->GetVal(0);
 		}
 
 	return val;

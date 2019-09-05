@@ -3,7 +3,7 @@
 #ifndef ANALYZER_TAG_H
 #define ANALYZER_TAG_H
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "util.h"
 #include "../Tag.h"
 #include "plugin/TaggedComponent.h"
@@ -42,11 +42,8 @@ public:
 	/**
 	 * Returns false if the tag represents an error value rather than a
 	 * legal analyzer type.
-	 * TODO: make this conversion operator "explicit" (C++11) or use a
-	 *       "safe bool" idiom (not necessary if "explicit" is available),
-	 *       otherwise this may allow nonsense/undesired comparison operations.
 	 */
-	operator bool() const	{ return *this != Tag(); }
+	explicit operator bool() const	{ return *this != Error; }
 
 	/**
 	 * Assignment operator.
@@ -85,7 +82,7 @@ public:
 	 */
 	EnumVal* AsEnumVal() const;
 
-	static Tag Error;
+	static const Tag Error;
 
 protected:
 	friend class analyzer::Manager;
@@ -102,14 +99,14 @@ protected:
 	 * @param subtype The sub type, which is left to an analyzer for
 	 * interpretation. By default it's set to zero.
 	 */
-	Tag(type_t type, subtype_t subtype = 0);
+	explicit Tag(type_t type, subtype_t subtype = 0);
 
 	/**
 	 * Constructor.
 	 *
 	 * @param val An enum value of script type \c Analyzer::Tag.
 	 */
-	Tag(EnumVal* val) : ::Tag(val) {}
+	explicit Tag(EnumVal* val) : ::Tag(val) {}
 };
 
 }

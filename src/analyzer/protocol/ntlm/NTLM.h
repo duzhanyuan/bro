@@ -15,14 +15,14 @@ class NTLM_Analyzer
 : public tcp::TCP_ApplicationAnalyzer {
 
 public:
-	NTLM_Analyzer(Connection* conn);
-	virtual ~NTLM_Analyzer();
+	explicit NTLM_Analyzer(Connection* conn);
+	~NTLM_Analyzer() override;
 
 	// Overriden from Analyzer.
 	void Done() override;
 
 	void DeliverStream(int len, const u_char* data, bool orig) override;
-	void Undelivered(uint64 seq, int len, bool orig) override;
+	void Undelivered(uint64_t seq, int len, bool orig) override;
 
 	// Overriden from tcp::TCP_ApplicationAnalyzer.
 	void EndpointEOF(bool is_orig) override;

@@ -49,6 +49,7 @@ FieldMapping FieldMapping::subType()
 Ascii::Ascii(ReaderFrontend *frontend) : ReaderBackend(frontend)
 	{
 	mtime = 0;
+	ino = 0;
 	suppress_warnings = false;
 	fail_on_file_problem = false;
 	fail_on_invalid_lines = false;
@@ -80,6 +81,9 @@ bool Ascii::DoInit(const ReaderInfo& info, int num_fields, const Field* const* f
 
 	fail_on_invalid_lines = BifConst::InputAscii::fail_on_invalid_lines;
 	fail_on_file_problem = BifConst::InputAscii::fail_on_file_problem;
+
+	path_prefix.assign((const char*) BifConst::InputAscii::path_prefix->Bytes(),
+	                   BifConst::InputAscii::path_prefix->Len());
 
 	// Set per-filter configuration options.
 	for ( ReaderInfo::config_map::const_iterator i = info.config.begin(); i != info.config.end(); i++ )
@@ -136,18 +140,34 @@ bool Ascii::OpenFile()
 	if ( file.is_open() )
 		return true;
 
-	file.open(Info().source);
+	// Handle path-prefixing. See similar logic in Binary::DoInit().
+	fname = Info().source;
+
+	if ( fname.front() != '/' && ! path_prefix.empty() )
+		{
+		string path = path_prefix;
+		std::size_t last = path.find_last_not_of("/");
+
+		if ( last == string::npos ) // Nothing but slashes -- weird but ok...
+			path = "/";
+		else
+			path.erase(last + 1);
+
+		fname = path + "/" + fname;
+		}
+
+	file.open(fname);
 
 	if ( ! file.is_open() )
 		{
-		FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s", Info().source), true);
+		FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s", fname.c_str()), true);
 
 		return ! fail_on_file_problem;
 		}
 
 	if ( ReadHeader(false) == false )
 		{
-		FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s; problem reading file header", Info().source), true);
+		FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s; problem reading file header", fname.c_str()), true);
 
 		file.close();
 		return ! fail_on_file_problem;
@@ -168,7 +188,7 @@ bool Ascii::ReadHeader(bool useCached)
 		if ( ! GetLine(line) )
 			{
 			FailWarn(fail_on_file_problem, Fmt("Could not read input data file %s; first line could not be read",
-							 Info().source), true);
+							   fname.c_str()), true);
 			return false;
 			}
 
@@ -211,7 +231,7 @@ bool Ascii::ReadHeader(bool useCached)
 				}
 
 			FailWarn(fail_on_file_problem, Fmt("Did not find requested field %s in input data file %s.",
-							 field->name, Info().source), true);
+							   field->name, fname.c_str()), true);
 
 			return false;
 			}
@@ -223,8 +243,8 @@ bool Ascii::ReadHeader(bool useCached)
 			map<string, uint32_t>::iterator fit2 = ifields.find(field->secondary_name);
 			if ( fit2 == ifields.end() )
 				{
-				FailWarn(fail_on_file_problem, Fmt("Could not find requested port type field %s in input data file.",
-								 field->secondary_name), true);
+				FailWarn(fail_on_file_problem, Fmt("Could not find requested port type field %s in input data file %s.",
+				                                   field->secondary_name, fname.c_str()), true);
 
 				return false;
 				}
@@ -273,21 +293,27 @@ bool Ascii::DoUpdate()
 			{
 			// check if the file has changed
 			struct stat sb;
-			if ( stat(Info().source, &sb) == -1 )
+			if ( stat(fname.c_str(), &sb) == -1 )
 				{
-				FailWarn(fail_on_file_problem, Fmt("Could not get stat for %s", Info().source), true);
+				FailWarn(fail_on_file_problem, Fmt("Could not get stat for %s", fname.c_str()), true);
 
 				file.close();
 				return ! fail_on_file_problem;
 				}
 
-			if ( sb.st_mtime <= mtime ) // no change
+			if ( sb.st_ino == ino && sb.st_mtime == mtime )
+				// no change
 				return true;
 
-			mtime = sb.st_mtime;
-			// file changed. reread.
+			// Warn again in case of trouble if the file changes. The comparison to 0
+			// is to suppress an extra warning that we'd otherwise get on the initial
+			// inode assignment.
+			if ( ino != 0 )
+				suppress_warnings = false;
 
-			// fallthrough
+			mtime = sb.st_mtime;
+			ino = sb.st_ino;
+			// File changed. Fall through to re-read.
 			}
 
 		case MODE_MANUAL:
@@ -365,8 +391,8 @@ bool Ascii::DoUpdate()
 
 			if ( (*fit).position > pos || (*fit).secondary_position > pos )
 				{
-				FailWarn(fail_on_invalid_lines, Fmt("Not enough fields in line %s. Found %d fields, want positions %d and %d",
-					  line.c_str(), pos, (*fit).position, (*fit).secondary_position));
+				FailWarn(fail_on_invalid_lines, Fmt("Not enough fields in line '%s' of %s. Found %d fields, want positions %d and %d",
+				                                    line.c_str(), fname.c_str(), pos, (*fit).position, (*fit).secondary_position));
 
 				if ( fail_on_invalid_lines )
 					{
@@ -388,7 +414,7 @@ bool Ascii::DoUpdate()
 
 			if ( val == 0 )
 				{
-				Warning(Fmt("Could not convert line '%s' to Val. Ignoring line.", line.c_str()));
+				Warning(Fmt("Could not convert line '%s' of %s to Val. Ignoring line.", line.c_str(), fname.c_str()));
 				error = true;
 				break;
 				}
@@ -448,8 +474,8 @@ bool Ascii::DoHeartbeat(double network_time, double current_time)
 
 		case MODE_REREAD:
 		case MODE_STREAM:
-			Update(); // call update and not DoUpdate, because update
-				  // checks disabled.
+			Update(); // Call Update, not DoUpdate, because Update
+				  // checks the "disabled" flag.
 			break;
 
 		default:

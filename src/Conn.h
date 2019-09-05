@@ -5,15 +5,16 @@
 
 #include <sys/types.h>
 
+#include <string>
+
 #include "Dict.h"
 #include "Val.h"
 #include "Timer.h"
-#include "Serializer.h"
-#include "PersistenceSerializer.h"
 #include "RuleMatcher.h"
 #include "IPAddr.h"
 #include "TunnelEncapsulation.h"
 #include "UID.h"
+#include "WeirdState.h"
 
 #include "analyzer/Tag.h"
 #include "analyzer/Analyzer.h"
@@ -40,13 +41,13 @@ typedef void (Connection::*timer_func)(double t);
 struct ConnID {
 	IPAddr src_addr;
 	IPAddr dst_addr;
-	uint32 src_port;
-	uint32 dst_port;
+	uint32_t src_port;
+	uint32_t dst_port;
 	bool is_one_way;	// if true, don't canonicalize order
 };
 
-static inline int addr_port_canon_lt(const IPAddr& addr1, uint32 p1,
-					const IPAddr& addr2, uint32 p2)
+static inline int addr_port_canon_lt(const IPAddr& addr1, uint32_t p1,
+					const IPAddr& addr2, uint32_t p2)
 	{
 	return addr1 < addr2 || (addr1 == addr2 && p1 < p2);
 	}
@@ -55,9 +56,9 @@ namespace analyzer { class Analyzer; }
 
 class Connection : public BroObj {
 public:
-	Connection(NetSessions* s, HashKey* k, double t, const ConnID* id,
-	           uint32 flow, const Packet* pkt, const EncapsulationStack* arg_encap);
-	virtual ~Connection();
+	Connection(NetSessions* s, const ConnIDKey& k, double t, const ConnID* id,
+	           uint32_t flow, const Packet* pkt, const EncapsulationStack* arg_encap);
+	~Connection() override;
 
 	// Invoked when an encapsulation is discovered. It records the
 	// encapsulation with the connection and raises a "tunnel_changed"
@@ -88,19 +89,23 @@ public:
 			// arguments for reproducing packets
 			const Packet *pkt);
 
-	HashKey* Key() const			{ return key; }
-	void ClearKey()				{ key = 0; }
+	// Keys are only considered valid for a connection when a
+	// connection is in the session map. If it is removed, the key
+	// should be marked invalid.
+	const ConnIDKey& Key() const	{ return key; }
+	void ClearKey()					{ key_valid = false; }
+	bool IsKeyValid() const			{ return key_valid; }
 
 	double StartTime() const		{ return start_time; }
-	void  SetStartTime(double t)		{ start_time = t; }
+	void SetStartTime(double t)		{ start_time = t; }
 	double LastTime() const			{ return last_time; }
 	void SetLastTime(double t) 		{ last_time = t; }
 
 	const IPAddr& OrigAddr() const		{ return orig_addr; }
 	const IPAddr& RespAddr() const		{ return resp_addr; }
 
-	uint32 OrigPort() const			{ return orig_port; }
-	uint32 RespPort() const			{ return resp_port; }
+	uint32_t OrigPort() const			{ return orig_port; }
+	uint32_t RespPort() const			{ return resp_port; }
 
 	void FlipRoles();
 
@@ -158,22 +163,41 @@ public:
 	void Match(Rule::PatternType type, const u_char* data, int len,
 			bool is_orig, bool bol, bool eol, bool clear_state);
 
-	// Tries really hard to extract a program name and a version.
-	Val* BuildVersionVal(const char* s, int len);
-
-	// Raises a software_version_found event based on the
-	// given string (returns false if it's not parseable).
-	int VersionFoundEvent(const IPAddr& addr, const char* s, int len,
-				analyzer::Analyzer* analyzer = 0);
-
-	// Raises a software_unparsed_version_found event.
-	int UnparsedVersionFoundEvent(const IPAddr& addr,
-			const char* full_descr, int len, analyzer::Analyzer* analyzer);
-
+	// If a handler exists for 'f', an event will be generated.  If 'name' is
+	// given that event's first argument will be it, and it's second will be
+	// the connection value.  If 'name' is null, then the event's first
+	// argument is the connection value.
 	void Event(EventHandlerPtr f, analyzer::Analyzer* analyzer, const char* name = 0);
+
+	// If a handler exists for 'f', an event will be generated.  In any case,
+	// 'v1' and 'v2' reference counts get decremented.  The event's first
+	// argument is the connection value, second argument is 'v1', and if 'v2'
+	// is given that will be it's third argument.
 	void Event(EventHandlerPtr f, analyzer::Analyzer* analyzer, Val* v1, Val* v2 = 0);
+
+	// If a handler exists for 'f', an event will be generated.  In any case,
+	// reference count for each element in the 'vl' list are decremented.  The
+	// arguments used for the event are whatevever is provided in 'vl'.
+	void ConnectionEvent(EventHandlerPtr f, analyzer::Analyzer* analyzer,
+				val_list vl);
+
+	// Same as ConnectionEvent, except taking the event's argument list via a
+	// pointer instead of by value.  This function takes ownership of the
+	// memory pointed to by 'vl' and also for decrementing the reference count
+	// of each of its elements.
 	void ConnectionEvent(EventHandlerPtr f, analyzer::Analyzer* analyzer,
 				val_list* vl);
+
+	// Queues an event without first checking if there's any available event
+	// handlers (or remote consumes).  If it turns out there's actually nothing
+	// that will consume the event, then this may leak memory due to failing to
+	// decrement the reference count of each element in 'vl'.  i.e. use this
+	// function instead of ConnectionEvent() if you've already guarded against
+	// the case where there's no handlers (one usually also does that because
+	// it would be a waste of effort to construct all the event arguments when
+	// there's no handlers to consume them).
+	void ConnectionEventFast(EventHandlerPtr f, analyzer::Analyzer* analyzer,
+				val_list vl);
 
 	void Weird(const char* name, const char* addl = "");
 	bool DidWeird() const	{ return weird != 0; }
@@ -193,14 +217,6 @@ public:
 		return 1;
 		}
 
-	void MakePersistent()
-		{
-		persistent = 1;
-		persistence_serializer->Register(this);
-		}
-
-	bool IsPersistent()	{ return persistent; }
-
 	void Describe(ODesc* d) const override;
 	void IDString(ODesc* d) const;
 
@@ -209,26 +225,21 @@ public:
 	// Returns true if connection has been received externally.
 	bool IsExternal() const	{ return conn_timer_mgr != 0; }
 
-	bool Serialize(SerialInfo* info) const;
-	static Connection* Unserialize(UnserialInfo* info);
-
-	DECLARE_SERIAL(Connection);
-
 	// Statistics.
 
 	// Just a lower bound.
 	unsigned int MemoryAllocation() const;
 	unsigned int MemoryAllocationConnVal() const;
 
-	static uint64 TotalConnections()
+	static uint64_t TotalConnections()
 		{ return total_connections; }
-	static uint64 CurrentConnections()
+	static uint64_t CurrentConnections()
 		{ return current_connections; }
-	static uint64 CurrentExternalConnections()
+	static uint64_t CurrentExternalConnections()
 		{ return external_connections; }
 
 	// Returns true if the history was already seen, false otherwise.
-	int CheckHistory(uint32 mask, char code)
+	int CheckHistory(uint32_t mask, char code)
 		{
 		if ( (hist_seen & mask) == 0 )
 			{
@@ -239,6 +250,17 @@ public:
 		else
 			return true;
 		}
+
+	// Increments the passed counter and adds it as a history
+	// code if it has crossed the next scaling threshold.  Scaling
+	// is done in terms of powers of the third argument.
+	// Returns true if the threshold was crossed, false otherwise.
+	bool ScaledHistoryEntry(char code, uint32_t& counter,
+	                        uint32_t& scaling_threshold,
+	                        uint32_t scaling_base = 10);
+
+	void HistoryThresholdEvent(EventHandlerPtr e, bool is_orig,
+	                           uint32_t threshold);
 
 	void AddHistory(char code)	{ history += code; }
 
@@ -252,21 +274,24 @@ public:
 	// Sets the transport protocol in use.
 	void SetTransport(TransportProto arg_proto)	{ proto = arg_proto; }
 
-	void SetUID(Bro::UID arg_uid)	 { uid = arg_uid; }
+	void SetUID(const Bro::UID &arg_uid)	 { uid = arg_uid; }
 
 	Bro::UID GetUID() const { return uid; }
 
 	const EncapsulationStack* GetEncapsulation() const
 		{ return encapsulation; }
 
-	void CheckFlowLabel(bool is_orig, uint32 flow_label);
+	void CheckFlowLabel(bool is_orig, uint32_t flow_label);
 
-	uint32 GetOrigFlowLabel() { return orig_flow_label; }
-	uint32 GetRespFlowLabel() { return resp_flow_label; }
+	uint32_t GetOrigFlowLabel() { return orig_flow_label; }
+	uint32_t GetRespFlowLabel() { return resp_flow_label; }
+
+	bool PermitWeird(const char* name, uint64_t threshold, uint64_t rate,
+	                 double duration);
 
 protected:
 
-	Connection()	{ persistent = 0; }
+	Connection()	{ }
 
 	// Add the given timer to expire at time t.  If do_expire
 	// is true, then the timer is also evaluated when Bro terminates,
@@ -284,7 +309,8 @@ protected:
 	void RemoveConnectionTimer(double t);
 
 	NetSessions* sessions;
-	HashKey* key;
+	ConnIDKey key;
+	bool key_valid;
 
 	// Timer manager to use for this conn (or nil).
 	TimerMgr::Tag* conn_timer_mgr;
@@ -292,10 +318,10 @@ protected:
 
 	IPAddr orig_addr;
 	IPAddr resp_addr;
-	uint32 orig_port, resp_port;	// in network order
+	uint32_t orig_port, resp_port;	// in network order
 	TransportProto proto;
-	uint32 orig_flow_label, resp_flow_label;	// most recent IPv6 flow labels
-	uint32 vlan, inner_vlan;	// VLAN this connection traverses, if available
+	uint32_t orig_flow_label, resp_flow_label;	// most recent IPv6 flow labels
+	uint32_t vlan, inner_vlan;	// VLAN this connection traverses, if available
 	u_char orig_l2_addr[Packet::l2_addr_len];	// Link-layer originator address, if available
 	u_char resp_l2_addr[Packet::l2_addr_len];	// Link-layer responder address, if available
 	double start_time, last_time;
@@ -312,22 +338,22 @@ protected:
 	unsigned int weird:1;
 	unsigned int finished:1;
 	unsigned int record_packets:1, record_contents:1;
-	unsigned int persistent:1;
 	unsigned int record_current_packet:1, record_current_content:1;
 	unsigned int saw_first_orig_packet:1, saw_first_resp_packet:1;
 
 	// Count number of connections.
-	static uint64 total_connections;
-	static uint64 current_connections;
-	static uint64 external_connections;
+	static uint64_t total_connections;
+	static uint64_t current_connections;
+	static uint64_t external_connections;
 
 	string history;
-	uint32 hist_seen;
+	uint32_t hist_seen;
 
 	analyzer::TransportLayerAnalyzer* root_analyzer;
 	analyzer::pia::PIA* primary_PIA;
 
 	Bro::UID uid;	// Globally unique connection ID.
+	WeirdStateMap weird_state;
 };
 
 class ConnectionTimer : public Timer {
@@ -336,7 +362,7 @@ public:
 			double arg_t, int arg_do_expire, TimerType arg_type)
 		: Timer(arg_t, arg_type)
 		{ Init(arg_conn, arg_timer, arg_do_expire); }
-	virtual ~ConnectionTimer();
+	~ConnectionTimer() override;
 
 	void Dispatch(double t, int is_expire) override;
 
@@ -344,8 +370,6 @@ protected:
 	ConnectionTimer()	{}
 
 	void Init(Connection* conn, timer_func timer, int do_expire);
-
-	DECLARE_SERIAL(ConnectionTimer);
 
 	Connection* conn;
 	timer_func timer;

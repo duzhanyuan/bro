@@ -4,7 +4,8 @@
 #define FILE_ANALYSIS_MANAGER_H
 
 #include <string>
-#include <queue>
+#include <set>
+#include <map>
 
 #include "Dict.h"
 #include "Net.h"
@@ -25,9 +26,6 @@
 #include "file_analysis/file_analysis.bif.h"
 
 namespace file_analysis {
-
-declare(PDict,bool);
-declare(PDict,File);
 
 /**
  * Main entry point for interacting with file analysis.
@@ -70,7 +68,8 @@ public:
 
 	/**
 	 * Creates a file identifier from a unique file handle string.
-	 * @param handle a unique string which identifies a single file.
+	 * @param handle a unique string (may contain NULs) which identifies
+	 * a single file.
 	 * @return a prettified MD5 hash of \a handle, truncated to *bits_per_uid* bits.
 	 */
 	string HashHandle(const string& handle) const;
@@ -78,7 +77,8 @@ public:
 	/**
 	 * Take in a unique file handle string to identify next piece of
 	 * incoming file data/information.
-	 * @param handle a unique string which identifies a single file.
+	 * @param handle a unique string (may contain NULs) which identifies
+	 * a single file.
 	 */
 	void SetHandle(const string& handle);
 
@@ -93,15 +93,23 @@ public:
 	 *        or false if is being sent in the opposite direction.
 	 * @param precomputed_file_id may be set to a previous return value in order to
 	 *        bypass costly file handle lookups.
+	 * @param mime_type may be set to the mime type of the file, if already known due
+	 *        to the protocol. This is, e.g., the case in TLS connections where X.509
+	 *        certificates are passed as files; here the type of the file is set by
+	 *        the protocol. If this parameter is given, MIME type detection will be
+	 *        disabled.
+	 *        This parameter only has any effect for the first DataIn call of each
+	 *        file. It is ignored for all subsequent calls.
 	 * @return a unique file ID string which, in certain contexts, may be
 	 *         cached and passed back in to a subsequent function call in order
 	 *         to avoid costly file handle lookups (which have to go through
 	 *         the \c get_file_handle script-layer event).  An empty string
 	 *         indicates the associate file is not going to be analyzed further.
 	 */
-	std::string DataIn(const u_char* data, uint64 len, uint64 offset,
+	std::string DataIn(const u_char* data, uint64_t len, uint64_t offset,
 	                   analyzer::Tag tag, Connection* conn, bool is_orig,
-	                   const std::string& precomputed_file_id = "");
+	                   const std::string& precomputed_file_id = "",
+	                   const std::string& mime_type = "");
 
 	/**
 	 * Pass in sequential file data.
@@ -113,15 +121,22 @@ public:
 	 *        or false if is being sent in the opposite direction.
 	 * @param precomputed_file_id may be set to a previous return value in order to
 	 *        bypass costly file handle lookups.
+	 * @param mime_type may be set to the mime type of the file, if already known due
+	 *        to the protocol. This is, e.g., the case in TLS connections where X.509
+	 *        certificates are passed as files; here the type of the file is set by
+	 *        the protocol. If this parameter is give, mime type detection will be
+	 *        disabled.
+	 *        This parameter is only used for the first bit of data for each file.
 	 * @return a unique file ID string which, in certain contexts, may be
 	 *         cached and passed back in to a subsequent function call in order
 	 *         to avoid costly file handle lookups (which have to go through
 	 *         the \c get_file_handle script-layer event).  An empty string
 	 *         indicates the associated file is not going to be analyzed further.
 	 */
-	std::string DataIn(const u_char* data, uint64 len, analyzer::Tag tag,
+	std::string DataIn(const u_char* data, uint64_t len, analyzer::Tag tag,
 	                   Connection* conn, bool is_orig,
-	                   const std::string& precomputed_file_id = "");
+	                   const std::string& precomputed_file_id = "",
+	                   const std::string& mime_type = "");
 
 	/**
 	 * Pass in sequential file data from external source (e.g. input framework).
@@ -132,7 +147,7 @@ public:
 	 *        in human-readable form where the file input is coming from (e.g.
 	 *        a local file path).
 	 */
-	void DataIn(const u_char* data, uint64 len, const string& file_id,
+	void DataIn(const u_char* data, uint64_t len, const string& file_id,
 	            const string& source);
 
 	/**
@@ -173,7 +188,7 @@ public:
 	 *         the \c get_file_handle script-layer event).  An empty string
 	 *         indicates the associate file is not going to be analyzed further.
 	 */
-	std::string Gap(uint64 offset, uint64 len, analyzer::Tag tag,
+	std::string Gap(uint64_t offset, uint64_t len, analyzer::Tag tag,
 	                Connection* conn, bool is_orig,
 	                const std::string& precomputed_file_id = "");
 
@@ -192,7 +207,7 @@ public:
 	 *         the \c get_file_handle script-layer event).  An empty string
 	 *         indicates the associate file is not going to be analyzed further.
 	 */
-	std::string SetSize(uint64 size, analyzer::Tag tag, Connection* conn,
+	std::string SetSize(uint64_t size, analyzer::Tag tag, Connection* conn,
 	                    bool is_orig, const std::string& precomputed_file_id = "");
 
 	/**
@@ -226,7 +241,7 @@ public:
 	/**
 	 * Set the reassembly for a file in bytes.
 	 */
-	bool SetReassemblyBuffer(const string& file_id, uint64 max);
+	bool SetReassemblyBuffer(const string& file_id, uint64_t max);
 
 	/**
 	 * Sets a limit on the maximum size allowed for extracting the file
@@ -239,7 +254,15 @@ public:
 	 *         else true.
 	 */
 	bool SetExtractionLimit(const string& file_id, RecordVal* args,
-	                        uint64 n) const;
+	                        uint64_t n) const;
+
+	/**
+	 * Try to retrieve a file that's being analyzed, using its identifier/hash.
+	 * @param file_id the file identifier/hash.
+	 * @return the File object mapped to \a file_id, or a null pointer if no
+	 *         mapping exists.
+	 */
+	File* LookupFile(const string& file_id) const;
 
 	/**
 	 * Queue attachment of an analzer to the file identifier.  Multiple
@@ -290,7 +313,7 @@ public:
 	 * @return Set of all matching file magic signatures, which may be
 	 *         an object allocated by the method if \a rval is a null pointer.
 	 */
-	RuleMatcher::MIME_Matches* DetectMIME(const u_char* data, uint64 len,
+	RuleMatcher::MIME_Matches* DetectMIME(const u_char* data, uint64_t len,
 					      RuleMatcher::MIME_Matches* rval) const;
 
 	/**
@@ -300,22 +323,19 @@ public:
 	 * @returns The MIME type string of the strongest file magic signature
 	 *          match, or an empty string if nothing matched.
 	 */
-	std::string DetectMIME(const u_char* data, uint64 len) const;
+	std::string DetectMIME(const u_char* data, uint64_t len) const;
 
-	uint64 CurrentFiles()
-		{ return id_map.Length(); }
+	uint64_t CurrentFiles()
+		{ return id_map.size(); }
 
-	uint64 MaxFiles()
-		{ return id_map.MaxLength(); }
+	uint64_t MaxFiles()
+		{ return max_files; }
 
-	uint64 CumulativeFiles()
-		{ return id_map.NumCumulativeInserts(); }
+	uint64_t CumulativeFiles()
+		{ return cumulative_files; }
 
 protected:
 	friend class FileTimer;
-
-	typedef PDict(bool) IDSet;
-	typedef PDict(File) IDMap;
 
 	/**
 	 * Create a new file to be analyzed or retrieve an existing one.
@@ -339,14 +359,6 @@ protected:
 	              analyzer::Tag tag = analyzer::Tag::Error,
 	              bool is_orig = false, bool update_conn = true,
 	              const char* source_name = 0);
-
-	/**
-	 * Try to retrieve a file that's being analyzed, using its identifier/hash.
-	 * @param file_id the file identifier/hash.
-	 * @return the File object mapped to \a file_id, or a null pointer if no
-	 *         mapping exists.
-	 */
-	File* LookupFile(const string& file_id) const;
 
 	/**
 	 * Evaluate timeout policy for a file and remove the File object mapped to
@@ -393,8 +405,8 @@ private:
 
 	TagSet* LookupMIMEType(const string& mtype, bool add_if_not_found);
 
-	PDict(File) id_map;  /**< Map file ID to file_analysis::File records. */
-	PDict(bool) ignored; /**< Ignored files.  Will be finally removed on EOF. */
+	std::map<string, File*> id_map;  /**< Map file ID to file_analysis::File records. */
+	std::set<string> ignored; /**< Ignored files.  Will be finally removed on EOF. */
 	string current_file_id;	/**< Hash of what get_file_handle event sets. */
 	RuleFileMagicState* magic_state;	/**< File magic signature match state. */
 	MIMEMap mime_types;/**< Mapping of MIME types to analyzers. */
@@ -402,6 +414,9 @@ private:
 	static TableVal* disabled;	/**< Table of disabled analyzers. */
 	static TableType* tag_set_type;	/**< Type for set[tag]. */
 	static string salt; /**< A salt added to file handles before hashing. */
+
+	size_t cumulative_files;
+	size_t max_files;
 };
 
 /**

@@ -52,8 +52,6 @@ static void input_hash_delete_func(void* val)
 	delete h;
 	}
 
-declare(PDict, InputHash);
-
 /**
  * Base stuff that every stream can do.
  */
@@ -109,8 +107,8 @@ public:
 	RecordType* rtype;
 	RecordType* itype;
 
-	PDict(InputHash)* currDict;
-	PDict(InputHash)* lastDict;
+	PDict<InputHash>* currDict;
+	PDict<InputHash>* lastDict;
 
 	Func* pred;
 
@@ -155,31 +153,31 @@ Manager::EventStream::EventStream()
 
 Manager::EventStream::~EventStream()
 	{
-        if ( fields )
-                Unref(fields);
+	if ( fields )
+		Unref(fields);
 	}
 
 Manager::TableStream::~TableStream()
 	{
-        if ( tab )
-	        Unref(tab);
+	if ( tab )
+		Unref(tab);
 
-        if ( itype )
-	        Unref(itype);
+	if ( itype )
+		Unref(itype);
 
 	if ( rtype ) // can be 0 for sets
 		Unref(rtype);
 
-        if ( currDict != 0 )
+	if ( currDict != 0 )
 		{
 		currDict->Clear();
-	        delete currDict;
+		delete currDict;
 		}
 
-        if ( lastDict != 0 )
+	if ( lastDict != 0 )
 		{
 		lastDict->Clear();;
-	        delete lastDict;
+		delete lastDict;
 		}
 	}
 
@@ -224,7 +222,7 @@ ReaderBackend* Manager::CreateBackend(ReaderFrontend* frontend, EnumVal* tag)
 	return backend;
 	}
 
-// Create a new input reader object to be used at whomevers leisure lateron.
+// Create a new input reader object to be used at whomevers leisure later on.
 bool Manager::CreateStream(Stream* info, RecordVal* description)
 	{
 	RecordType* rtype = description->Type()->AsRecordType();
@@ -232,7 +230,7 @@ bool Manager::CreateStream(Stream* info, RecordVal* description)
 		|| same_type(rtype, BifType::Record::Input::EventDescription, 0)
 		|| same_type(rtype, BifType::Record::Input::AnalysisDescription, 0) ) )
 		{
-		reporter->Error("Streamdescription argument not of right type for new input stream");
+		reporter->Error("Stream description argument not of right type for new input stream");
 		return false;
 		}
 
@@ -547,6 +545,7 @@ bool Manager::CreateTableStream(RecordVal* fval)
 
 	Val *want_record = fval->Lookup("want_record", true);
 
+	if ( val )
 		{
 		const BroType* table_yield = dst->Type()->AsTableType()->YieldType();
 		const BroType* compare_type = val;
@@ -562,6 +561,17 @@ bool Manager::CreateTableStream(RecordVal* fval)
 			table_yield->Describe(&desc2);
 			reporter->Error("Input stream %s: Table type does not match value type. Need type '%s', got '%s'", stream_name.c_str(),
 					desc1.Description(), desc2.Description());
+			return false;
+			}
+		}
+	else
+		{
+		if ( ! dst->Type()->IsSet() )
+			{
+			reporter->Error("Input stream %s: 'destination' field is a table,"
+			                " but 'val' field is not provided"
+			                " (did you mean to use a set instead of a table?)",
+			                stream_name.c_str());
 			return false;
 			}
 		}
@@ -691,9 +701,9 @@ bool Manager::CreateTableStream(RecordVal* fval)
 	stream->itype = idx->AsRecordType();
 	stream->event = event ? event_registry->Lookup(event->Name()) : 0;
 	stream->error_event = error_event ? event_registry->Lookup(error_event->Name()) : nullptr;
-	stream->currDict = new PDict(InputHash);
+	stream->currDict = new PDict<InputHash>;
 	stream->currDict->SetDeleteFunc(input_hash_delete_func);
-	stream->lastDict = new PDict(InputHash);
+	stream->lastDict = new PDict<InputHash>;
 	stream->lastDict->SetDeleteFunc(input_hash_delete_func);
 	stream->want_record = ( want_record->InternalInt() == 1 );
 
@@ -711,7 +721,7 @@ bool Manager::CreateTableStream(RecordVal* fval)
 	return true;
 	}
 
-bool Manager::CheckErrorEventTypes(std::string stream_name, Func* ev, bool table)
+bool Manager::CheckErrorEventTypes(std::string stream_name, const Func* ev, bool table) const
 	{
 	if ( ev == nullptr )
 		return true;
@@ -812,6 +822,7 @@ bool Manager::IsCompatibleType(BroType* t, bool atomic_only)
 	case TYPE_INTERVAL:
 	case TYPE_ENUM:
 	case TYPE_STRING:
+	case TYPE_PATTERN:
 		return true;
 
 	case TYPE_RECORD:
@@ -899,7 +910,7 @@ bool Manager::RemoveStreamContinuation(ReaderFrontend* reader)
 	}
 
 bool Manager::UnrollRecordType(vector<Field*> *fields, const RecordType *rec,
-			       const string& nameprepend, bool allow_file_func)
+			       const string& nameprepend, bool allow_file_func) const
 	{
 	for ( int i = 0; i < rec->NumFields(); i++ )
 		{
@@ -1007,7 +1018,7 @@ bool Manager::ForceUpdate(const string &name)
 }
 
 
-Val* Manager::RecordValToIndexVal(RecordVal *r)
+Val* Manager::RecordValToIndexVal(RecordVal *r) const
 	{
 	Val* idxval;
 
@@ -1032,7 +1043,7 @@ Val* Manager::RecordValToIndexVal(RecordVal *r)
 	}
 
 
-Val* Manager::ValueToIndexVal(const Stream* i, int num_fields, const RecordType *type, const Value* const *vals, bool& have_error)
+Val* Manager::ValueToIndexVal(const Stream* i, int num_fields, const RecordType *type, const Value* const *vals, bool& have_error) const
 	{
 	Val* idxval;
 	int position = 0;
@@ -1083,7 +1094,7 @@ void Manager::SendEntry(ReaderFrontend* reader, Value* *vals)
 
 	else if ( i->stream_type == EVENT_STREAM )
 		{
-		EnumVal *type = new EnumVal(BifEnum::Input::EVENT_NEW, BifType::Enum::Input::Event);
+		EnumVal *type = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_NEW);
 		readFields = SendEventStreamEvent(i, type, vals);
 		}
 
@@ -1189,9 +1200,9 @@ int Manager::SendEntryTable(Stream* i, const Value* const *vals)
 		if ( ! pred_convert_error )
 			{
 			if ( updated )
-				ev = new EnumVal(BifEnum::Input::EVENT_CHANGED, BifType::Enum::Input::Event);
+				ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_CHANGED);
 			else
-				ev = new EnumVal(BifEnum::Input::EVENT_NEW, BifType::Enum::Input::Event);
+				ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_NEW);
 
 			bool result;
 			if ( stream->num_val_fields > 0 ) // we have values
@@ -1292,13 +1303,13 @@ int Manager::SendEntryTable(Stream* i, const Value* const *vals)
 		else if ( updated )
 			{ // in case of update send back the old value.
 			assert ( stream->num_val_fields > 0 );
-			ev = new EnumVal(BifEnum::Input::EVENT_CHANGED, BifType::Enum::Input::Event);
+			ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_CHANGED);
 			assert ( oldval != 0 );
 			SendEvent(stream->event, 4, stream->description->Ref(), ev, predidx, oldval);
 			}
 		else
 			{
-			ev = new EnumVal(BifEnum::Input::EVENT_NEW, BifType::Enum::Input::Event);
+			ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_NEW);
 			if ( stream->num_val_fields == 0 )
 				{
 				Ref(stream->description);
@@ -1363,7 +1374,7 @@ void Manager::EndCurrentSend(ReaderFrontend* reader)
 			assert(val != 0);
 			predidx = ListValToRecordVal(idx, stream->itype, &startpos);
 			Unref(idx);
-			ev = new EnumVal(BifEnum::Input::EVENT_REMOVED, BifType::Enum::Input::Event);
+			ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_REMOVED);
 			}
 
 		if ( stream->pred )
@@ -1412,7 +1423,7 @@ void Manager::EndCurrentSend(ReaderFrontend* reader)
 	delete(stream->lastDict);
 
 	stream->lastDict = stream->currDict;
-	stream->currDict = new PDict(InputHash);
+	stream->currDict = new PDict<InputHash>;
 	stream->currDict->SetDeleteFunc(input_hash_delete_func);
 
 #ifdef DEBUG
@@ -1472,7 +1483,7 @@ void Manager::Put(ReaderFrontend* reader, Value* *vals)
 
 	else if ( i->stream_type == EVENT_STREAM )
 		{
-		EnumVal *type = new EnumVal(BifEnum::Input::EVENT_NEW, BifType::Enum::Input::Event);
+		EnumVal *type = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_NEW);
 		readFields = SendEventStreamEvent(i, type, vals);
 		}
 
@@ -1610,11 +1621,9 @@ int Manager::PutTable(Stream* i, const Value* const *vals)
 			else
 				{
 				if ( updated )
-					ev = new EnumVal(BifEnum::Input::EVENT_CHANGED,
-							 BifType::Enum::Input::Event);
+					ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_CHANGED);
 				else
-					ev = new EnumVal(BifEnum::Input::EVENT_NEW,
-							 BifType::Enum::Input::Event);
+					ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_NEW);
 
 				bool result;
 				if ( stream->num_val_fields > 0 ) // we have values
@@ -1654,16 +1663,14 @@ int Manager::PutTable(Stream* i, const Value* const *vals)
 					{
 					// in case of update send back the old value.
 					assert ( stream->num_val_fields > 0 );
-					ev = new EnumVal(BifEnum::Input::EVENT_CHANGED,
-							 BifType::Enum::Input::Event);
+					ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_CHANGED);
 					assert ( oldval != 0 );
 					SendEvent(stream->event, 4, stream->description->Ref(),
 							ev, predidx, oldval);
 					}
 				else
 					{
-					ev = new EnumVal(BifEnum::Input::EVENT_NEW,
-										 BifType::Enum::Input::Event);
+					ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_NEW);
 					if ( stream->num_val_fields == 0 )
 						SendEvent(stream->event, 4, stream->description->Ref(),
 								ev, predidx);
@@ -1749,7 +1756,7 @@ bool Manager::Delete(ReaderFrontend* reader, Value* *vals)
 				else
 					{
 					Ref(val);
-					EnumVal *ev = new EnumVal(BifEnum::Input::EVENT_REMOVED, BifType::Enum::Input::Event);
+					EnumVal *ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_REMOVED);
 
 					streamresult = CallPred(stream->pred, 3, ev, predidx, val);
 
@@ -1769,7 +1776,7 @@ bool Manager::Delete(ReaderFrontend* reader, Value* *vals)
 				Ref(idxval);
 				assert(val != 0);
 				Ref(val);
-				EnumVal *ev = new EnumVal(BifEnum::Input::EVENT_REMOVED, BifType::Enum::Input::Event);
+				EnumVal *ev = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_REMOVED);
 				SendEvent(stream->event, 4, stream->description->Ref(), ev, idxval, val);
 				}
 			}
@@ -1789,7 +1796,7 @@ bool Manager::Delete(ReaderFrontend* reader, Value* *vals)
 
 	else if ( i->stream_type == EVENT_STREAM  )
 		{
-		EnumVal *type = new EnumVal(BifEnum::Input::EVENT_REMOVED, BifType::Enum::Input::Event);
+		EnumVal *type = BifType::Enum::Input::Event->GetVal(BifEnum::Input::EVENT_REMOVED);
 		readVals = SendEventStreamEvent(i, type, vals);
 		success = true;
 		}
@@ -1810,7 +1817,7 @@ bool Manager::Delete(ReaderFrontend* reader, Value* *vals)
 	return success;
 	}
 
-bool Manager::CallPred(Func* pred_func, const int numvals, ...)
+bool Manager::CallPred(Func* pred_func, const int numvals, ...) const
 	{
 	bool result = false;
 	val_list vl(numvals);
@@ -1818,7 +1825,7 @@ bool Manager::CallPred(Func* pred_func, const int numvals, ...)
 	va_list lP;
 	va_start(lP, numvals);
 	for ( int i = 0; i < numvals; i++ )
-		vl.append( va_arg(lP, Val*) );
+		vl.push_back( va_arg(lP, Val*) );
 
 	va_end(lP);
 
@@ -1835,7 +1842,7 @@ bool Manager::CallPred(Func* pred_func, const int numvals, ...)
 // Raise everything in here as warnings so it is passed to scriptland without
 // looking "fatal". In addition to these warnings, ReaderBackend will queue
 // one reporter message.
-bool Manager::SendEvent(ReaderFrontend* reader, const string& name, const int num_vals, Value* *vals)
+bool Manager::SendEvent(ReaderFrontend* reader, const string& name, const int num_vals, Value* *vals) const
 	{
 	Stream *i = FindStream(reader);
 	if ( i == 0 )
@@ -1845,7 +1852,7 @@ bool Manager::SendEvent(ReaderFrontend* reader, const string& name, const int nu
 		return false;
 		}
 
-	EventHandler* handler = event_registry->Lookup(name.c_str());
+	EventHandler* handler = event_registry->Lookup(name);
 	if ( handler == 0 )
 		{
 		Warning(i, "Event %s not found", name.c_str());
@@ -1869,26 +1876,37 @@ bool Manager::SendEvent(ReaderFrontend* reader, const string& name, const int nu
 
 	bool convert_error = false;
 
-	val_list* vl = new val_list;
+	val_list vl(num_vals);
+
 	for ( int j = 0; j < num_vals; j++)
-		vl->append(ValueToVal(i, vals[j], type->FieldType(j), convert_error));
+		{
+		Val* v = ValueToVal(i, vals[j], convert_error);
+		vl.push_back(v);
+		if ( v && ! convert_error && ! same_type(type->FieldType(j), v->Type()) )
+			{
+			convert_error = true;
+			type->FieldType(j)->Error("SendEvent types do not match", v->Type());
+			}
+		}
 
 	delete_value_ptr_array(vals, num_vals);
 
 	if ( convert_error )
 		{
-		delete_vals(vl);
+		for ( const auto& v : vl )
+			Unref(v);
+
 		return false;
 		}
 	else
-		mgr.QueueEvent(handler, vl, SOURCE_LOCAL);
+		mgr.QueueEvent(handler, std::move(vl), SOURCE_LOCAL);
 
 	return true;
 }
 
-void Manager::SendEvent(EventHandlerPtr ev, const int numvals, ...)
+void Manager::SendEvent(EventHandlerPtr ev, const int numvals, ...) const
 	{
-	val_list* vl = new val_list;
+	val_list vl(numvals);
 
 #ifdef DEBUG
 	DBG_LOG(DBG_INPUT, "SendEvent with %d vals",
@@ -1898,16 +1916,16 @@ void Manager::SendEvent(EventHandlerPtr ev, const int numvals, ...)
 	va_list lP;
 	va_start(lP, numvals);
 	for ( int i = 0; i < numvals; i++ )
-		vl->append( va_arg(lP, Val*) );
+		vl.push_back( va_arg(lP, Val*) );
 
 	va_end(lP);
 
-	mgr.QueueEvent(ev, vl, SOURCE_LOCAL);
+	mgr.QueueEvent(ev, std::move(vl), SOURCE_LOCAL);
 	}
 
-void Manager::SendEvent(EventHandlerPtr ev, list<Val*> events)
+void Manager::SendEvent(EventHandlerPtr ev, list<Val*> events) const
 	{
-	val_list* vl = new val_list;
+	val_list vl(events.size());
 
 #ifdef DEBUG
 	DBG_LOG(DBG_INPUT, "SendEvent with %" PRIuPTR " vals (list)",
@@ -1915,16 +1933,14 @@ void Manager::SendEvent(EventHandlerPtr ev, list<Val*> events)
 #endif
 
 	for ( list<Val*>::iterator i = events.begin(); i != events.end(); i++ )
-		{
-		vl->append( *i );
-		}
+		vl.push_back( *i );
 
-	mgr.QueueEvent(ev, vl, SOURCE_LOCAL);
+	mgr.QueueEvent(ev, std::move(vl), SOURCE_LOCAL);
 	}
 
 // Convert a bro list value to a bro record value.
 // I / we could think about moving this functionality to val.cc
-RecordVal* Manager::ListValToRecordVal(ListVal* list, RecordType *request_type, int* position)
+RecordVal* Manager::ListValToRecordVal(ListVal* list, RecordType *request_type, int* position) const
 	{
 	assert(position != 0 ); // we need the pointer to point to data;
 
@@ -1954,7 +1970,7 @@ RecordVal* Manager::ListValToRecordVal(ListVal* list, RecordType *request_type, 
 
 // Convert a threading value to a record value
 RecordVal* Manager::ValueToRecordVal(const Stream* stream, const Value* const *vals,
-	                             RecordType *request_type, int* position, bool& have_error)
+	                             RecordType *request_type, int* position, bool& have_error) const
 	{
 	assert(position != 0); // we need the pointer to point to data.
 
@@ -1991,7 +2007,8 @@ RecordVal* Manager::ValueToRecordVal(const Stream* stream, const Value* const *v
 
 // Count the length of the values used to create a correct length buffer for
 // hashing later
-int Manager::GetValueLength(const Value* val) {
+int Manager::GetValueLength(const Value* val) const
+	{
 	assert( val->present ); // presence has to be checked elsewhere
 	int length = 0;
 
@@ -2056,6 +2073,12 @@ int Manager::GetValueLength(const Value* val) {
 		}
 		break;
 
+	case TYPE_PATTERN:
+		{
+		length += strlen(val->val.pattern_text_val) + 1;
+		break;
+		}
+
 	case TYPE_TABLE:
 		{
 		for ( int i = 0; i < val->val.set_val.size; i++ )
@@ -2081,7 +2104,7 @@ int Manager::GetValueLength(const Value* val) {
 
 // Given a threading::value, copy the raw data bytes into *data and return how many bytes were copied.
 // Used for hashing the values for lookup in the bro table
-int Manager::CopyValue(char *data, const int startpos, const Value* val)
+int Manager::CopyValue(char *data, const int startpos, const Value* val) const
 	{
 	assert( val->present ); // presence has to be checked elsewhere
 
@@ -2175,6 +2198,14 @@ int Manager::CopyValue(char *data, const int startpos, const Value* val)
 		return length;
 		}
 
+	case TYPE_PATTERN:
+		{
+		// include null-terminator
+		int length = strlen(val->val.pattern_text_val) + 1;
+		memcpy(data + startpos, val->val.pattern_text_val, length);
+		return length;
+		}
+
 	case TYPE_TABLE:
 		{
 		int length = 0;
@@ -2205,7 +2236,7 @@ int Manager::CopyValue(char *data, const int startpos, const Value* val)
 	}
 
 // Hash num_elements threading values and return the HashKey for them. At least one of the vals has to be ->present.
-HashKey* Manager::HashValues(const int num_elements, const Value* const *vals)
+HashKey* Manager::HashValues(const int num_elements, const Value* const *vals) const
 	{
 	int length = 0;
 
@@ -2251,29 +2282,30 @@ HashKey* Manager::HashValues(const int num_elements, const Value* const *vals)
 // have_error is a reference to a boolean which is set to true as soon as an error occured.
 // When have_error is set to true at the beginning of the function, it is assumed that
 // an error already occured in the past and processing is aborted.
-Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_type, bool& have_error)
+Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_type, bool& have_error) const
 	{
 	if ( have_error )
-		return 0;
+		return nullptr;
 
 	if ( request_type->Tag() != TYPE_ANY && request_type->Tag() != val->type )
 		{
 		reporter->InternalError("Typetags don't match: %d vs %d in stream %s", request_type->Tag(), val->type, i->name.c_str());
-		return 0;
+		return nullptr;
 		}
 
 	if ( !val->present )
-		return 0; // unset field
+		return nullptr; // unset field
 
 	switch ( val->type ) {
 	case TYPE_BOOL:
+		return val_mgr->GetBool(val->val.int_val);
+
 	case TYPE_INT:
-		return new Val(val->val.int_val, val->type);
-		break;
+		return val_mgr->GetInt(val->val.int_val);
 
 	case TYPE_COUNT:
 	case TYPE_COUNTER:
-		return new Val(val->val.uint_val, val->type);
+		return val_mgr->GetCount(val->val.int_val);
 
 	case TYPE_DOUBLE:
 	case TYPE_TIME:
@@ -2287,7 +2319,7 @@ Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_typ
 		}
 
 	case TYPE_PORT:
-		return new PortVal(val->val.port_val.port, val->val.port_val.proto);
+		return val_mgr->GetPort(val->val.port_val.port, val->val.port_val.proto);
 
 	case TYPE_ADDR:
 		{
@@ -2312,7 +2344,7 @@ Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_typ
 
 	case TYPE_SUBNET:
 		{
-		IPAddr* addr = 0;
+		IPAddr* addr = nullptr;
 		switch ( val->val.subnet_val.prefix.family ) {
 		case IPv4:
 			addr = new IPAddr(val->val.subnet_val.prefix.in.in4);
@@ -2329,6 +2361,13 @@ Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_typ
 		SubNetVal* subnetval = new SubNetVal(*addr, val->val.subnet_val.length);
 		delete addr;
 		return subnetval;
+		}
+
+	case TYPE_PATTERN:
+		{
+		RE_Matcher* re = new RE_Matcher(val->val.pattern_text_val);
+		re->Compile();
+		return new PatternVal(re);
 		}
 
 	case TYPE_TABLE:
@@ -2359,7 +2398,7 @@ Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_typ
 		VectorVal* v = new VectorVal(vt);
 		for ( int j = 0; j < val->val.vector_val.size; j++ )
 			{
-			v->Assign(j, ValueToVal(i, val->val.set_val.vals[j], type, have_error));
+			v->Assign(j, ValueToVal(i, val->val.vector_val.vals[j], type, have_error));
 			}
 
 		Unref(vt);
@@ -2384,10 +2423,10 @@ Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_typ
 			                        enum_string.c_str(), i->name.c_str());
 
 			have_error = true;
-			return 0;
+			return nullptr;
 			}
 
-		return new EnumVal(index, request_type->Ref()->AsEnumType());
+		return request_type->Ref()->AsEnumType()->GetVal(index);
 		}
 
 	default:
@@ -2398,9 +2437,186 @@ Val* Manager::ValueToVal(const Stream* i, const Value* val, BroType* request_typ
 	return NULL;
 	}
 
-Manager::Stream* Manager::FindStream(const string &name)
+Val* Manager::ValueToVal(const Stream* i, const Value* val, bool& have_error) const
 	{
-	for ( map<ReaderFrontend*, Stream*>::iterator s = readers.begin(); s != readers.end(); ++s )
+	if ( have_error )
+		return nullptr;
+
+	if ( ! val->present )
+		return nullptr; // unset field
+
+	switch ( val->type ) {
+	case TYPE_BOOL:
+		return val_mgr->GetBool(val->val.int_val);
+
+	case TYPE_INT:
+		return val_mgr->GetInt(val->val.int_val);
+
+	case TYPE_COUNT:
+	case TYPE_COUNTER:
+		return val_mgr->GetCount(val->val.int_val);
+
+	case TYPE_DOUBLE:
+	case TYPE_TIME:
+	case TYPE_INTERVAL:
+		return new Val(val->val.double_val, val->type);
+
+	case TYPE_STRING:
+		{
+		BroString *s = new BroString((const u_char*)val->val.string_val.data, val->val.string_val.length, 1);
+		return new StringVal(s);
+		}
+
+	case TYPE_PORT:
+		return val_mgr->GetPort(val->val.port_val.port, val->val.port_val.proto);
+
+	case TYPE_ADDR:
+		{
+		IPAddr* addr = 0;
+		switch ( val->val.addr_val.family ) {
+		case IPv4:
+			addr = new IPAddr(val->val.addr_val.in.in4);
+			break;
+
+		case IPv6:
+			addr = new IPAddr(val->val.addr_val.in.in6);
+			break;
+
+		default:
+			assert(false);
+		}
+
+		AddrVal* addrval = new AddrVal(*addr);
+		delete addr;
+		return addrval;
+		}
+
+	case TYPE_SUBNET:
+		{
+		IPAddr* addr = nullptr;
+		switch ( val->val.subnet_val.prefix.family ) {
+		case IPv4:
+			addr = new IPAddr(val->val.subnet_val.prefix.in.in4);
+			break;
+
+		case IPv6:
+			addr = new IPAddr(val->val.subnet_val.prefix.in.in6);
+			break;
+
+		default:
+			assert(false);
+		}
+
+		SubNetVal* subnetval = new SubNetVal(*addr, val->val.subnet_val.length);
+		delete addr;
+		return subnetval;
+		}
+
+	case TYPE_PATTERN:
+		{
+		RE_Matcher* re = new RE_Matcher(val->val.pattern_text_val);
+		re->Compile();
+		return new PatternVal(re);
+		}
+
+	case TYPE_TABLE:
+		{
+		TypeList* set_index;
+		if ( val->val.set_val.size == 0 && val->subtype == TYPE_VOID )
+			// don't know type - unspecified table.
+			set_index = new TypeList();
+		else
+			{
+			// all entries have to have the same type...
+			TypeTag stag = val->subtype;
+			if ( stag == TYPE_VOID )
+				TypeTag stag = val->val.set_val.vals[0]->type;
+
+			set_index = new TypeList(base_type(stag)->Ref());
+			set_index->Append(base_type(stag)->Ref());
+			}
+
+		SetType* s = new SetType(set_index, 0);
+		TableVal* t = new TableVal(s);
+		for ( int j = 0; j < val->val.set_val.size; j++ )
+			{
+			Val* assignval = ValueToVal(i, val->val.set_val.vals[j], have_error);
+
+			t->Assign(assignval, 0);
+			Unref(assignval); // index is not consumed by assign.
+			}
+
+		Unref(s);
+		return t;
+		}
+
+	case TYPE_VECTOR:
+		{
+		BroType* type;
+		if ( val->val.vector_val.size == 0  && val->subtype == TYPE_VOID )
+			// don't know type - unspecified table.
+			type = base_type(TYPE_ANY);
+		else
+			{
+			// all entries have to have the same type...
+			if ( val->subtype == TYPE_VOID )
+				type = base_type(val->val.vector_val.vals[0]->type);
+			else
+				type = base_type(val->subtype);
+			}
+
+		VectorType* vt = new VectorType(type->Ref());
+		VectorVal* v = new VectorVal(vt);
+		for ( int j = 0; j < val->val.vector_val.size; j++ )
+			{
+			v->Assign(j, ValueToVal(i, val->val.vector_val.vals[j], have_error));
+			}
+
+		Unref(vt);
+		return v;
+		}
+
+	case TYPE_ENUM: {
+		// Convert to string first to not have to deal with missing
+		// \0's...
+		string enum_string(val->val.string_val.data, val->val.string_val.length);
+
+		// let's try looking it up by global ID.
+		ID* id = lookup_ID(enum_string.c_str(), GLOBAL_MODULE_NAME);
+		if ( ! id || ! id->IsEnumConst() )
+			{
+			Warning(i, "Value '%s' for stream '%s' is not a valid enum.",
+			                        enum_string.c_str(), i->name.c_str());
+
+			have_error = true;
+			return nullptr;
+			}
+
+		EnumType* t = id->Type()->AsEnumType();
+		int intval = t->Lookup(id->ModuleName(), id->Name());
+		if ( intval < 0 )
+			{
+			Warning(i, "Enum value '%s' for stream '%s' not found.",
+			                        enum_string.c_str(), i->name.c_str());
+
+			have_error = true;
+			return nullptr;
+			}
+
+		return t->GetVal(intval);
+		}
+
+	default:
+		reporter->InternalError("Unsupported type for input_read in stream %s", i->name.c_str());
+	}
+
+	assert(false);
+	return NULL;
+	}
+
+Manager::Stream* Manager::FindStream(const string &name) const
+	{
+	for ( auto s = readers.begin(); s != readers.end(); ++s )
 		{
 		if ( (*s).second->name  == name )
 			return (*s).second;
@@ -2409,9 +2625,9 @@ Manager::Stream* Manager::FindStream(const string &name)
 	return 0;
 	}
 
-Manager::Stream* Manager::FindStream(ReaderFrontend* reader)
+Manager::Stream* Manager::FindStream(ReaderFrontend* reader) const
 	{
-	map<ReaderFrontend*, Stream*>::iterator s = readers.find(reader);
+	auto s = readers.find(reader);
 	if ( s != readers.end() )
 		return s->second;
 
@@ -2433,7 +2649,7 @@ void Manager::Terminate()
 
 	}
 
-void Manager::Info(ReaderFrontend* reader, const char* msg)
+void Manager::Info(ReaderFrontend* reader, const char* msg) const
 	{
 	Stream *i = FindStream(reader);
 	if ( !i )
@@ -2445,7 +2661,7 @@ void Manager::Info(ReaderFrontend* reader, const char* msg)
 	ErrorHandler(i, ErrorType::INFO, false, "%s", msg);
 	}
 
-void Manager::Warning(ReaderFrontend* reader, const char* msg)
+void Manager::Warning(ReaderFrontend* reader, const char* msg) const
 	{
 	Stream *i = FindStream(reader);
 	if ( !i )
@@ -2457,7 +2673,7 @@ void Manager::Warning(ReaderFrontend* reader, const char* msg)
 	ErrorHandler(i, ErrorType::WARNING, false, "%s", msg);
 	}
 
-void Manager::Error(ReaderFrontend* reader, const char* msg)
+void Manager::Error(ReaderFrontend* reader, const char* msg) const
 	{
 	Stream *i = FindStream(reader);
 	if ( !i )
@@ -2469,7 +2685,7 @@ void Manager::Error(ReaderFrontend* reader, const char* msg)
 	ErrorHandler(i, ErrorType::ERROR, false, "%s", msg);
 	}
 
-void Manager::Info(const Stream* i, const char* fmt, ...)
+void Manager::Info(const Stream* i, const char* fmt, ...) const
 	{
 	va_list ap;
 	va_start(ap, fmt);
@@ -2477,7 +2693,7 @@ void Manager::Info(const Stream* i, const char* fmt, ...)
 	va_end(ap);
 	}
 
-void Manager::Warning(const Stream* i, const char* fmt, ...)
+void Manager::Warning(const Stream* i, const char* fmt, ...) const
 	{
 	va_list ap;
 	va_start(ap, fmt);
@@ -2485,7 +2701,7 @@ void Manager::Warning(const Stream* i, const char* fmt, ...)
 	va_end(ap);
 	}
 
-void Manager::Error(const Stream* i, const char* fmt, ...)
+void Manager::Error(const Stream* i, const char* fmt, ...) const
 	{
 	va_list ap;
 	va_start(ap, fmt);
@@ -2493,7 +2709,7 @@ void Manager::Error(const Stream* i, const char* fmt, ...)
 	va_end(ap);
 	}
 
-void Manager::ErrorHandler(const Stream* i, ErrorType et, bool reporter_send, const char* fmt, ...)
+void Manager::ErrorHandler(const Stream* i, ErrorType et, bool reporter_send, const char* fmt, ...) const
 	{
 	va_list ap;
 	va_start(ap, fmt);
@@ -2501,7 +2717,7 @@ void Manager::ErrorHandler(const Stream* i, ErrorType et, bool reporter_send, co
 	va_end(ap);
 	}
 
-void Manager::ErrorHandler(const Stream* i, ErrorType et, bool reporter_send, const char* fmt, va_list ap)
+void Manager::ErrorHandler(const Stream* i, ErrorType et, bool reporter_send, const char* fmt, va_list ap) const
 	{
 	char* buf;
 
@@ -2519,19 +2735,20 @@ void Manager::ErrorHandler(const Stream* i, ErrorType et, bool reporter_send, co
 		switch (et)
 			{
 			case ErrorType::INFO:
-				ev = new EnumVal(BifEnum::Reporter::INFO, BifType::Enum::Reporter::Level);
+				ev = BifType::Enum::Reporter::Level->GetVal(BifEnum::Reporter::INFO);
 				break;
 
 			case ErrorType::WARNING:
-				ev = new EnumVal(BifEnum::Reporter::WARNING, BifType::Enum::Reporter::Level);
+				ev = BifType::Enum::Reporter::Level->GetVal(BifEnum::Reporter::WARNING);
 				break;
 
 			case ErrorType::ERROR:
-				ev = new EnumVal(BifEnum::Reporter::ERROR, BifType::Enum::Reporter::Level);
+				ev = BifType::Enum::Reporter::Level->GetVal(BifEnum::Reporter::ERROR);
 				break;
 
 			default:
 				reporter->InternalError("Unknown error type while trying to report input error %s", fmt);
+				__builtin_unreachable();
 			}
 
 		StringVal* message = new StringVal(buf);

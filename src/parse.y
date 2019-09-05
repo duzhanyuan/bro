@@ -2,28 +2,29 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 %}
 
-%expect 78
+// Switching parser table type fixes ambiguity problems.
+%define lr.type ielr
+
+%expect 105
 
 %token TOK_ADD TOK_ADD_TO TOK_ADDR TOK_ANY
 %token TOK_ATENDIF TOK_ATELSE TOK_ATIF TOK_ATIFDEF TOK_ATIFNDEF
-%token TOK_BOOL TOK_BREAK TOK_CASE TOK_CONST
+%token TOK_BOOL TOK_BREAK TOK_CASE TOK_OPTION TOK_CONST
 %token TOK_CONSTANT TOK_COPY TOK_COUNT TOK_COUNTER TOK_DEFAULT TOK_DELETE
 %token TOK_DOUBLE TOK_ELSE TOK_ENUM TOK_EVENT TOK_EXPORT TOK_FALLTHROUGH
 %token TOK_FILE TOK_FOR TOK_FUNCTION TOK_GLOBAL TOK_HOOK TOK_ID TOK_IF TOK_INT
 %token TOK_INTERVAL TOK_LIST TOK_LOCAL TOK_MODULE
-%token TOK_NEXT TOK_OF TOK_OPAQUE TOK_PATTERN TOK_PATTERN_TEXT
+%token TOK_NEXT TOK_OF TOK_OPAQUE TOK_PATTERN TOK_PATTERN_END TOK_PATTERN_TEXT
 %token TOK_PORT TOK_PRINT TOK_RECORD TOK_REDEF
 %token TOK_REMOVE_FROM TOK_RETURN TOK_SCHEDULE TOK_SET
 %token TOK_STRING TOK_SUBNET TOK_SWITCH TOK_TABLE
 %token TOK_TIME TOK_TIMEOUT TOK_TIMER TOK_TYPE TOK_UNION TOK_VECTOR TOK_WHEN
-%token TOK_WHILE
+%token TOK_WHILE TOK_AS TOK_IS
 
-%token TOK_ATTR_ADD_FUNC TOK_ATTR_ENCRYPT TOK_ATTR_DEFAULT
-%token TOK_ATTR_OPTIONAL TOK_ATTR_REDEF TOK_ATTR_ROTATE_INTERVAL
-%token TOK_ATTR_ROTATE_SIZE TOK_ATTR_DEL_FUNC TOK_ATTR_EXPIRE_FUNC
+%token TOK_ATTR_ADD_FUNC TOK_ATTR_DEFAULT TOK_ATTR_OPTIONAL TOK_ATTR_REDEF
+%token TOK_ATTR_DEL_FUNC TOK_ATTR_EXPIRE_FUNC
 %token TOK_ATTR_EXPIRE_CREATE TOK_ATTR_EXPIRE_READ TOK_ATTR_EXPIRE_WRITE
-%token TOK_ATTR_PERSISTENT TOK_ATTR_SYNCHRONIZED
-%token TOK_ATTR_RAW_OUTPUT TOK_ATTR_MERGEABLE
+%token TOK_ATTR_RAW_OUTPUT
 %token TOK_ATTR_PRIORITY TOK_ATTR_LOG TOK_ATTR_ERROR_HANDLER
 %token TOK_ATTR_TYPE_COLUMN TOK_ATTR_DEPRECATED
 
@@ -31,29 +32,32 @@
 
 %token TOK_NO_TEST
 
-%left ',' '|'
+%left ','
 %right '=' TOK_ADD_TO TOK_REMOVE_FROM
 %right '?' ':'
-%left TOK_OR
-%left TOK_AND
+%left TOK_OR_OR
+%left TOK_AND_AND
 %nonassoc TOK_HOOK
 %nonassoc '<' '>' TOK_LE TOK_GE TOK_EQ TOK_NE
 %left TOK_IN TOK_NOT_IN
+%left '|'
+%left '^'
+%left '&'
 %left '+' '-'
 %left '*' '/' '%'
 %left TOK_INCR TOK_DECR
-%right '!'
+%right '!' '~'
 %left '$' '[' ']' '(' ')' TOK_HAS_FIELD TOK_HAS_ATTR
+%nonassoc TOK_AS TOK_IS
 
-%type <b> opt_no_test opt_no_test_block opt_deprecated
-%type <str> TOK_ID TOK_PATTERN_TEXT single_pattern
-%type <id> local_id global_id def_global_id event_id global_or_event_id resolve_id begin_func
-%type <id_l> local_id_list
+%type <b> opt_no_test opt_no_test_block TOK_PATTERN_END
+%type <str> TOK_ID TOK_PATTERN_TEXT
+%type <id> local_id global_id def_global_id event_id global_or_event_id resolve_id begin_func case_type
+%type <id_l> local_id_list case_type_list
 %type <ic> init_class
 %type <expr> opt_init
 %type <val> TOK_CONSTANT
-%type <re> pattern
-%type <expr> expr opt_expr init anonymous_function
+%type <expr> expr opt_expr init anonymous_function index_slice opt_deprecated
 %type <event_expr> event
 %type <stmt> stmt stmt_list func_body for_head
 %type <type> type opt_type enum_body
@@ -82,12 +86,15 @@
 #include "Scope.h"
 #include "Reporter.h"
 #include "Brofiler.h"
-#include "broxygen/Manager.h"
+#include "zeekygen/Manager.h"
 
 #include <set>
 #include <string>
 
 extern const char* filename;  // Absolute path of file currently being parsed.
+extern const char* last_filename; // Absolute path of last file parsed.
+extern const char* last_tok_filename;
+extern const char* last_last_tok_filename;
 
 YYLTYPE GetCurrentLocation();
 extern int yyerror(const char[]);
@@ -157,11 +164,8 @@ static type_decl_list* copy_type_decl_list(type_decl_list* tdl)
 
 	type_decl_list* rval = new type_decl_list();
 
-	loop_over_list(*tdl, i)
-		{
-		TypeDecl* td = (*tdl)[i];
-		rval->append(new TypeDecl(*td));
-		}
+	for ( const auto& td : *tdl )
+		rval->push_back(new TypeDecl(*td));
 
 	return rval;
 	}
@@ -173,11 +177,10 @@ static attr_list* copy_attr_list(attr_list* al)
 
 	attr_list* rval = new attr_list();
 
-	loop_over_list(*al, i)
+	for ( const auto& a : *al )
 		{
-		Attr* a = (*al)[i];
 		::Ref(a);
-		rval->append(a);
+		rval->push_back(a);
 		}
 
 	return rval;
@@ -228,18 +231,6 @@ static bool expr_is_table_type_name(const Expr* expr)
 
 	return false;
 	}
-
-static bool has_attr(const attr_list* al, attr_tag tag)
-	{
-	if ( ! al )
-		return false;
-
-	for ( int i = 0; i < al->length(); ++i )
-		if ( (*al)[i]->Tag() == tag )
-			return true;
-
-	return false;
-	}
 %}
 
 %union {
@@ -273,11 +264,11 @@ bro:
 		decl_list stmt_list
 			{
 			if ( stmts )
-				stmts->AsStmtList()->Stmts().append($2);
+				stmts->AsStmtList()->Stmts().push_back($2);
 			else
 				stmts = $2;
 
-			// Any objects creates from hereon out should not
+			// Any objects creates from here on out should not
 			// have file positions associated with them.
 			set_location(no_location);
 			}
@@ -334,6 +325,12 @@ expr:
 			$$ = new NotExpr($2);
 			}
 
+	|	'~' expr
+			{
+			set_location(@1, @2);
+			$$ = new ComplementExpr($2);
+			}
+
 	|	'-' expr	%prec '!'
 			{
 			set_location(@1, @2);
@@ -388,16 +385,34 @@ expr:
 			$$ = new ModExpr($1, $3);
 			}
 
-	|	expr TOK_AND expr
+	|	expr '&' expr
 			{
 			set_location(@1, @3);
-			$$ = new BoolExpr(EXPR_AND, $1, $3);
+			$$ = new BitExpr(EXPR_AND, $1, $3);
 			}
 
-	|	expr TOK_OR expr
+	|	expr '|' expr
 			{
 			set_location(@1, @3);
-			$$ = new BoolExpr(EXPR_OR, $1, $3);
+			$$ = new BitExpr(EXPR_OR, $1, $3);
+			}
+
+	|	expr '^' expr
+			{
+			set_location(@1, @3);
+			$$ = new BitExpr(EXPR_XOR, $1, $3);
+			}
+
+	|	expr TOK_AND_AND expr
+			{
+			set_location(@1, @3);
+			$$ = new BoolExpr(EXPR_AND_AND, $1, $3);
+			}
+
+	|	expr TOK_OR_OR expr
+			{
+			set_location(@1, @3);
+			$$ = new BoolExpr(EXPR_OR_OR, $1, $3);
 			}
 
 	|	expr TOK_EQ expr
@@ -445,13 +460,19 @@ expr:
 	|	expr '=' expr
 			{
 			set_location(@1, @3);
+
+			if ( $1->Tag() == EXPR_INDEX && $1->AsIndexExpr()->IsSlice() )
+				reporter->Error("index slice assignment may not be used"
+				                " in arbitrary expression contexts, only"
+				                " as a statement");
+
 			$$ = get_assign_expr($1, $3, in_init);
 			}
 
 	|	TOK_LOCAL local_id '=' expr
 			{
 			set_location(@2, @4);
-			$$ = add_and_assign_local($2, $4, new Val(1, TYPE_BOOL));
+			$$ = add_and_assign_local($2, $4, val_mgr->GetBool(1));
 			}
 
 	|	expr '[' expr_list ']'
@@ -460,15 +481,7 @@ expr:
 			$$ = new IndexExpr($1, $3);
 			}
 
-	|	expr '[' opt_expr ':' opt_expr ']'
-			{
-			set_location(@1, @6);
-			Expr* low = $3 ? $3 : new ConstExpr(new Val(0, TYPE_COUNT));
-			Expr* high = $5 ? $5 : new SizeExpr($1);
-			ListExpr* le = new ListExpr(low);
-			le->Append(high);
-			$$ = new IndexExpr($1, le, true);
-			}
+	|	index_slice
 
 	|	expr '$' TOK_ID
 			{
@@ -632,6 +645,7 @@ expr:
 
 	|	anonymous_function
 
+
 	|	TOK_SCHEDULE expr '{' event '}'
 			{
 			set_location(@1, @5);
@@ -677,13 +691,13 @@ expr:
 							       id->Name());
 					if ( intval < 0 )
 						reporter->InternalError("enum value not found for %s", id->Name());
-					$$ = new ConstExpr(new EnumVal(intval, t));
+					$$ = new ConstExpr(t->GetVal(intval));
 					}
 				else
 					$$ = new NameExpr(id);
 
 				if ( id->IsDeprecated() )
-					reporter->Warning("deprecated (%s)", id->Name());
+					reporter->Warning("%s", id->GetDeprecationWarning().c_str());
 				}
 			}
 
@@ -693,17 +707,41 @@ expr:
 			$$ = new ConstExpr($1);
 			}
 
-	|	pattern
+	|	'/' { begin_RE(); } TOK_PATTERN_TEXT TOK_PATTERN_END
 			{
-			set_location(@1);
-			$1->Compile();
-			$$ = new ConstExpr(new PatternVal($1));
+			set_location(@3);
+
+			RE_Matcher* re = new RE_Matcher($3);
+			delete [] $3;
+
+			if ( $4 )
+				re->MakeCaseInsensitive();
+
+			re->Compile();
+			$$ = new ConstExpr(new PatternVal(re));
 			}
 
-	|       '|' expr '|'
+	|       '|' expr '|'	%prec '('
 			{
 			set_location(@1, @3);
-			$$ = new SizeExpr($2);
+			auto e = $2;
+
+			if ( IsIntegral(e->Type()->Tag()) )
+				e = new ArithCoerceExpr(e, TYPE_INT);
+
+			$$ = new SizeExpr(e);
+			}
+
+	|       expr TOK_AS type
+			{
+			set_location(@1, @3);
+			$$ = new CastExpr($1, $3);
+			}
+
+	|       expr TOK_IS type
+			{
+			set_location(@1, @3);
+			$$ = new IsExpr($1, $3);
 			}
 	;
 
@@ -725,25 +763,6 @@ opt_expr_list:
 		expr_list
 	|
 		{ $$ = new ListExpr(); }
-	;
-
-pattern:
-		pattern '|' single_pattern
-			{
-			$1->AddPat($3);
-			delete [] $3;
-			}
-
-	|	single_pattern
-			{
-			$$ = new RE_Matcher($1);
-			delete [] $1;
-			}
-	;
-
-single_pattern:
-		'/' { begin_RE(); } TOK_PATTERN_TEXT { end_RE(); } '/'
-			{ $$ = $3; }
 	;
 
 enum_body:
@@ -972,7 +991,7 @@ type:
 				{
 				NullStmt here;
 				if ( $1 )
-					$1->Error("not a BRO type", &here);
+					$1->Error("not a Zeek type", &here);
 				$$ = error_type();
 				}
 			else
@@ -980,7 +999,7 @@ type:
 				Ref($$);
 
 				if ( $1->IsDeprecated() )
-					reporter->Warning("deprecated (%s)", $1->Name());
+					reporter->Warning("%s", $1->GetDeprecationWarning().c_str());
 				}
 			}
 	;
@@ -998,7 +1017,7 @@ type_list:
 type_decl_list:
 		type_decl_list type_decl
 			{
-			$1->append($2);
+			$1->push_back($2);
 			}
 	|
 			{
@@ -1013,7 +1032,7 @@ type_decl:
 			$$ = new TypeDecl($3, $1, $4, (in_record > 0));
 
 			if ( in_record > 0 && cur_decl_type_id )
-				broxygen_mgr->RecordField(cur_decl_type_id, $$, ::filename);
+				zeekygen_mgr->RecordField(cur_decl_type_id, $$, ::filename);
 			}
 	;
 
@@ -1028,11 +1047,11 @@ formal_args:
 
 formal_args_decl_list:
 		formal_args_decl_list ';' formal_args_decl
-			{ $1->append($3); }
+			{ $1->push_back($3); }
 	|	formal_args_decl_list ',' formal_args_decl
-			{ $1->append($3); }
+			{ $1->push_back($3); }
 	|	formal_args_decl
-			{ $$ = new type_decl_list(); $$->append($1); }
+			{ $$ = new type_decl_list(); $$->push_back($1); }
 	;
 
 formal_args_decl:
@@ -1047,7 +1066,7 @@ decl:
 		TOK_MODULE TOK_ID ';'
 			{
 			current_module = $2;
-			broxygen_mgr->ModuleUsage(::filename, current_module);
+			zeekygen_mgr->ModuleUsage(::filename, current_module);
 			}
 
 	|	TOK_EXPORT '{' { is_export = true; } decl_list '}'
@@ -1056,30 +1075,36 @@ decl:
 	|	TOK_GLOBAL def_global_id opt_type init_class opt_init opt_attr ';'
 			{
 			add_global($2, $3, $4, $5, $6, VAR_REGULAR);
-			broxygen_mgr->Identifier($2);
+			zeekygen_mgr->Identifier($2);
+			}
+
+	|	TOK_OPTION def_global_id opt_type init_class opt_init opt_attr ';'
+			{
+			add_global($2, $3, $4, $5, $6, VAR_OPTION);
+			zeekygen_mgr->Identifier($2);
 			}
 
 	|	TOK_CONST def_global_id opt_type init_class opt_init opt_attr ';'
 			{
 			add_global($2, $3, $4, $5, $6, VAR_CONST);
-			broxygen_mgr->Identifier($2);
+			zeekygen_mgr->Identifier($2);
 			}
 
 	|	TOK_REDEF global_id opt_type init_class opt_init opt_attr ';'
 			{
 			add_global($2, $3, $4, $5, $6, VAR_REDEF);
-			broxygen_mgr->Redef($2, ::filename);
+			zeekygen_mgr->Redef($2, ::filename, $4, $5);
 			}
 
 	|	TOK_REDEF TOK_ENUM global_id TOK_ADD_TO '{'
-			{ parser_redef_enum($3); broxygen_mgr->Redef($3, ::filename); }
+			{ parser_redef_enum($3); zeekygen_mgr->Redef($3, ::filename); }
 		enum_body '}' ';'
 			{
-			// Broxygen already grabbed new enum IDs as the type created them.
+			// Zeekygen already grabbed new enum IDs as the type created them.
 			}
 
 	|	TOK_REDEF TOK_RECORD global_id
-			{ cur_decl_type_id = $3; broxygen_mgr->Redef($3, ::filename); }
+			{ cur_decl_type_id = $3; zeekygen_mgr->Redef($3, ::filename); }
 		TOK_ADD_TO '{'
 			{ ++in_record; }
 		type_decl_list
@@ -1095,19 +1120,26 @@ decl:
 			}
 
 	|	TOK_TYPE global_id ':'
-			{ cur_decl_type_id = $2; broxygen_mgr->StartType($2);  }
+			{ cur_decl_type_id = $2; zeekygen_mgr->StartType($2);  }
 		type opt_attr ';'
 			{
 			cur_decl_type_id = 0;
 			add_type($2, $5, $6);
-			broxygen_mgr->Identifier($2);
+			zeekygen_mgr->Identifier($2);
 			}
 
 	|	func_hdr func_body
 			{ }
 
+	|	func_hdr conditional_list func_body
+			{ }
+
 	|	conditional
 	;
+
+conditional_list:
+		conditional
+	|	conditional conditional_list
 
 conditional:
 		TOK_ATIF '(' expr ')'
@@ -1123,43 +1155,49 @@ conditional:
 	;
 
 func_hdr:
-		TOK_FUNCTION def_global_id func_params
+		TOK_FUNCTION def_global_id func_params opt_attr
 			{
 			begin_func($2, current_module.c_str(),
-				FUNC_FLAVOR_FUNCTION, 0, $3);
+				FUNC_FLAVOR_FUNCTION, 0, $3, $4);
 			$$ = $3;
-			broxygen_mgr->Identifier($2);
+			zeekygen_mgr->Identifier($2);
 			}
-	|	TOK_EVENT event_id func_params
+	|	TOK_EVENT event_id func_params opt_attr
 			{
+			// Gracefully handle the deprecation of bro_init, bro_done,
+			// and bro_script_loaded
+			if ( streq("bro_init", $2->Name()) )
+				$2 = global_scope()->Lookup("zeek_init");
+			else if ( streq("bro_done", $2->Name()) )
+				$2 = global_scope()->Lookup("zeek_done");
+			else if ( streq("bro_script_loaded", $2->Name()) )
+				$2 = global_scope()->Lookup("zeek_script_loaded");
+
 			begin_func($2, current_module.c_str(),
-				   FUNC_FLAVOR_EVENT, 0, $3);
+				   FUNC_FLAVOR_EVENT, 0, $3, $4);
 			$$ = $3;
 			}
-	|	TOK_HOOK def_global_id func_params
+	|	TOK_HOOK def_global_id func_params opt_attr
 			{
 			$3->ClearYieldType(FUNC_FLAVOR_HOOK);
 			$3->SetYieldType(base_type(TYPE_BOOL));
 			begin_func($2, current_module.c_str(),
-				   FUNC_FLAVOR_HOOK, 0, $3);
+				   FUNC_FLAVOR_HOOK, 0, $3, $4);
 			$$ = $3;
 			}
-	|	TOK_REDEF TOK_EVENT event_id func_params
+	|	TOK_REDEF TOK_EVENT event_id func_params opt_attr
 			{
 			begin_func($3, current_module.c_str(),
-				   FUNC_FLAVOR_EVENT, 1, $4);
+				   FUNC_FLAVOR_EVENT, 1, $4, $5);
 			$$ = $4;
 			}
 	;
 
 func_body:
-		opt_attr '{'
+		'{'
 			{
 			saved_in_init.push_back(in_init);
 			in_init = 0;
-
-			if ( has_attr($1, ATTR_DEPRECATED) )
-				current_scope()->ScopeID()->MakeDeprecated();
 			}
 
 		stmt_list
@@ -1170,21 +1208,44 @@ func_body:
 
 		'}'
 			{
-			end_func($4, $1);
+			end_func($3);
 			}
 	;
 
 anonymous_function:
-		TOK_FUNCTION begin_func func_body
-			{ $$ = new ConstExpr($2->ID_Val()); }
+		TOK_FUNCTION begin_func
+
+		'{'
+			{
+			saved_in_init.push_back(in_init);
+			in_init = 0;
+			}
+
+		stmt_list
+			{
+			in_init = saved_in_init.back();
+			saved_in_init.pop_back();
+			}
+
+		'}'
+			{
+			// Code duplication here is sad but needed. end_func actually instantiates the function
+			// and associates it with an ID. We perform that association later and need to return
+			// a lambda expression.
+
+			// Gather the ingredients for a BroFunc from the current scope
+			std::unique_ptr<function_ingredients> ingredients = gather_function_ingredients(current_scope(), $5);
+			id_list outer_ids = gather_outer_ids(pop_scope(), $5);
+
+			$$ = new LambdaExpr(std::move(ingredients), std::move(outer_ids));
+			}
 	;
 
 begin_func:
 		func_params
 			{
 			$$ = current_scope()->GenerateTemporary("anonymous-function");
-			begin_func($$, current_module.c_str(),
-				   FUNC_FLAVOR_FUNCTION, 0, $1);
+			begin_func($$, current_module.c_str(), FUNC_FLAVOR_FUNCTION, 0, $1);
 			}
 	;
 
@@ -1224,6 +1285,21 @@ init:
 	|	expr
 	;
 
+index_slice:
+		expr '[' opt_expr ':' opt_expr ']'
+			{
+			set_location(@1, @6);
+			Expr* low = $3 ? $3 : new ConstExpr(val_mgr->GetCount(0));
+			Expr* high = $5 ? $5 : new SizeExpr($1);
+
+			if ( ! IsIntegral(low->Type()->Tag()) || ! IsIntegral(high->Type()->Tag()) )
+				reporter->Error("slice notation must have integral values as indexes");
+
+			ListExpr* le = new ListExpr(low);
+			le->Append(high);
+			$$ = new IndexExpr($1, le, true);
+			}
+
 opt_attr:
 		attr_list
 	|
@@ -1232,25 +1308,21 @@ opt_attr:
 
 attr_list:
 		attr_list attr
-			{ $1->append($2); }
+			{ $1->push_back($2); }
 	|	attr
 			{
 			$$ = new attr_list;
-			$$->append($1);
+			$$->push_back($1);
 			}
 	;
 
 attr:
 		TOK_ATTR_DEFAULT '=' expr
-			{ $$ = new Attr(ATTR_DEFAULT, $3); }
+		        { $$ = new Attr(ATTR_DEFAULT, $3); }
 	|	TOK_ATTR_OPTIONAL
 			{ $$ = new Attr(ATTR_OPTIONAL); }
 	|	TOK_ATTR_REDEF
 			{ $$ = new Attr(ATTR_REDEF); }
-	|	TOK_ATTR_ROTATE_INTERVAL '=' expr
-			{ $$ = new Attr(ATTR_ROTATE_INTERVAL, $3); }
-	|	TOK_ATTR_ROTATE_SIZE '=' expr
-			{ $$ = new Attr(ATTR_ROTATE_SIZE, $3); }
 	|	TOK_ATTR_ADD_FUNC '=' expr
 			{ $$ = new Attr(ATTR_ADD_FUNC, $3); }
 	|	TOK_ATTR_DEL_FUNC '=' expr
@@ -1263,18 +1335,8 @@ attr:
 			{ $$ = new Attr(ATTR_EXPIRE_READ, $3); }
 	|	TOK_ATTR_EXPIRE_WRITE '=' expr
 			{ $$ = new Attr(ATTR_EXPIRE_WRITE, $3); }
-	|	TOK_ATTR_PERSISTENT
-			{ $$ = new Attr(ATTR_PERSISTENT); }
-	|	TOK_ATTR_SYNCHRONIZED
-			{ $$ = new Attr(ATTR_SYNCHRONIZED); }
-	|	TOK_ATTR_ENCRYPT
-			{ $$ = new Attr(ATTR_ENCRYPT); }
-	|	TOK_ATTR_ENCRYPT '=' expr
-			{ $$ = new Attr(ATTR_ENCRYPT, $3); }
 	|	TOK_ATTR_RAW_OUTPUT
 			{ $$ = new Attr(ATTR_RAW_OUTPUT); }
-	|	TOK_ATTR_MERGEABLE
-			{ $$ = new Attr(ATTR_MERGEABLE); }
 	|	TOK_ATTR_PRIORITY '=' expr
 			{ $$ = new Attr(ATTR_PRIORITY, $3); }
 	|	TOK_ATTR_TYPE_COLUMN '=' expr
@@ -1285,6 +1347,19 @@ attr:
 			{ $$ = new Attr(ATTR_ERROR_HANDLER); }
 	|	TOK_ATTR_DEPRECATED
 			{ $$ = new Attr(ATTR_DEPRECATED); }
+	|	TOK_ATTR_DEPRECATED '=' TOK_CONSTANT
+			{
+			if ( IsString($3->Type()->Tag()) )
+				$$ = new Attr(ATTR_DEPRECATED, new ConstExpr($3));
+			else
+				{
+				ODesc d;
+				$3->Describe(&d);
+				reporter->Error("'&deprecated=%s' must use a string literal",
+				                d.Description());
+				$$ = new Attr(ATTR_DEPRECATED);
+				}
+			}
 	;
 
 stmt:
@@ -1441,6 +1516,15 @@ stmt:
 			    brofiler.DecIgnoreDepth();
 			}
 
+	|	index_slice '=' expr ';' opt_no_test
+			{
+			set_location(@1, @4);
+			$$ = new ExprStmt(get_assign_expr($1, $3, in_init));
+
+			if ( ! $5 )
+				brofiler.AddStmt($$);
+			}
+
 	|	expr ';' opt_no_test
 			{
 			set_location(@1, @2);
@@ -1463,7 +1547,7 @@ stmt_list:
 		stmt_list stmt
 			{
 			set_location(@1, @2);
-			$1->AsStmtList()->Stmts().append($2);
+			$1->AsStmtList()->Stmts().push_back($2);
 			$1->UpdateLocationEndInfo(@2);
 			}
 	|
@@ -1484,7 +1568,7 @@ event:
 					YYERROR;
 					}
 				if ( id->IsDeprecated() )
-					reporter->Warning("deprecated (%s)", id->Name());
+					reporter->Warning("%s", id->GetDeprecationWarning().c_str());
 				}
 
 			$$ = new EventExpr($1, $3);
@@ -1493,18 +1577,54 @@ event:
 
 case_list:
 		case_list case
-			{ $1->append($2); }
+			{ $1->push_back($2); }
 	|
 			{ $$ = new case_list; }
 	;
 
 case:
 		TOK_CASE expr_list ':' stmt_list
-			{ $$ = new Case($2, $4); }
+			{ $$ = new Case($2, 0, $4); }
+	|
+		TOK_CASE case_type_list ':' stmt_list
+			{ $$ = new Case(0, $2, $4); }
 	|
 		TOK_DEFAULT ':' stmt_list
-			{ $$ = new Case(0, $3); }
+			{ $$ = new Case(0, 0, $3); }
 	;
+
+case_type_list:
+		case_type_list ',' case_type
+			{ $1->push_back($3); }
+	|
+		case_type
+			{
+			$$ = new id_list;
+			$$->push_back($1);
+			}
+	;
+
+case_type:
+		TOK_TYPE type
+			{
+			$$ = new ID(0, SCOPE_FUNCTION, 0);
+			$$->SetType($2);
+			}
+
+	|	TOK_TYPE type TOK_AS TOK_ID
+			{
+			const char* name = $4;
+			BroType* type = $2;
+			ID* case_var = lookup_ID(name, current_module.c_str());
+
+			if ( case_var && case_var->IsGlobal() )
+				case_var->Error("already a global identifier");
+			else
+				case_var = install_ID(name, current_module.c_str(), false, false);
+
+			add_local(case_var, type, INIT_NONE, 0, 0, VAR_REGULAR);
+			$$ = case_var;
+			}
 
 for_head:
 		TOK_FOR '(' TOK_ID TOK_IN expr ')'
@@ -1520,7 +1640,7 @@ for_head:
 			if ( loop_var )
 				{
 				if ( loop_var->IsGlobal() )
-					loop_var->Error("global used in for loop");
+					loop_var->Error("global variable used in for loop");
 				}
 
 			else
@@ -1528,22 +1648,76 @@ for_head:
 						      false, false);
 
 			id_list* loop_vars = new id_list;
-			loop_vars->append(loop_var);
+			loop_vars->push_back(loop_var);
 
 			$$ = new ForStmt(loop_vars, $5);
 			}
 	|
 		TOK_FOR '(' '[' local_id_list ']' TOK_IN expr ')'
-			{ $$ = new ForStmt($4, $7); }
-		;
+			{
+			$$ = new ForStmt($4, $7);
+			}
+	|
+		TOK_FOR '(' TOK_ID ',' TOK_ID TOK_IN expr ')'
+			{
+			set_location(@1, @8);
+			const char* module = current_module.c_str();
+
+			// Check for previous definitions of key and
+			// value variables.
+			ID* key_var = lookup_ID($3, module);
+			ID* val_var = lookup_ID($5, module);
+
+			// Validate previous definitions as needed.
+			if ( key_var )
+				{
+				if ( key_var->IsGlobal() )
+					key_var->Error("global variable used in for loop");
+				}
+			else
+				key_var = install_ID($3, module, false, false);
+
+			if ( val_var )
+				{
+				if ( val_var->IsGlobal() )
+					val_var->Error("global variable used in for loop");
+				}
+			else
+				val_var = install_ID($5, module, false, false);
+
+			id_list* loop_vars = new id_list;
+			loop_vars->push_back(key_var);
+
+			$$ = new ForStmt(loop_vars, $7, val_var);
+			}
+	|
+		TOK_FOR '(' '[' local_id_list ']' ',' TOK_ID TOK_IN expr ')'
+			{
+			set_location(@1, @10);
+			const char* module = current_module.c_str();
+
+			// Validate value variable
+			ID* val_var = lookup_ID($7, module);
+
+			if ( val_var )
+				{
+				if ( val_var->IsGlobal() )
+					val_var->Error("global variable used in for loop");
+				}
+			else
+				val_var = install_ID($7, module, false, false);
+
+			$$ = new ForStmt($4, $9, val_var);
+			}
+	;
 
 local_id_list:
 		local_id_list ',' local_id
-			{ $1->append($3); }
+			{ $1->push_back($3); }
 	|	local_id
 			{
 			$$ = new id_list;
-			$$->append($1);
+			$$->push_back($1);
 			}
 	;
 
@@ -1600,7 +1774,7 @@ global_or_event_id:
 
 					if ( t->Tag() != TYPE_FUNC ||
 					     t->AsFuncType()->Flavor() != FUNC_FLAVOR_FUNCTION )
-						reporter->Warning("deprecated (%s)", $$->Name());
+						reporter->Warning("%s", $$->GetDeprecationWarning().c_str());
 					}
 
 				delete [] $1;
@@ -1646,27 +1820,49 @@ opt_no_test_block:
 
 opt_deprecated:
 		TOK_ATTR_DEPRECATED
-			{ $$ = true; }
+			{ $$ = new ConstExpr(new StringVal("")); }
 	|
-			{ $$ = false; }
+		TOK_ATTR_DEPRECATED '=' TOK_CONSTANT
+			{
+			if ( IsString($3->Type()->Tag()) )
+				$$ = new ConstExpr($3);
+			else
+				{
+				ODesc d;
+				$3->Describe(&d);
+				reporter->Error("'&deprecated=%s' must use a string literal",
+				                d.Description());
+				$$ = new ConstExpr(new StringVal(""));
+				}
+			}
+	|
+			{ $$ = nullptr; }
 
 %%
 
 int yyerror(const char msg[])
 	{
-	char* msgbuf = new char[strlen(msg) + strlen(last_tok) + 128];
-
-	if ( last_tok[0] == '\n' )
-		sprintf(msgbuf, "%s, on previous line", msg);
-	else if ( last_tok[0] == '\0' )
-		sprintf(msgbuf, "%s, at end of file", msg);
-	else
-		sprintf(msgbuf, "%s, at or near \"%s\"", msg, last_tok);
-
 	if ( in_debug )
 		g_curr_debug_error = copy_string(msg);
 
-	reporter->Error("%s", msgbuf);
+	if ( last_tok[0] == '\n' )
+		reporter->Error("%s, on previous line", msg);
+	else if ( last_tok[0] == '\0' )
+		{
+		if ( last_filename )
+			reporter->Error("%s, at end of file %s", msg, last_filename);
+		else
+			reporter->Error("%s, at end of file", msg);
+		}
+	else
+		{
+		if ( last_last_tok_filename && last_tok_filename &&
+		     ! streq(last_last_tok_filename, last_tok_filename) )
+			reporter->Error("%s, at or near \"%s\" or end of file %s",
+			                msg, last_tok, last_last_tok_filename);
+		else
+			reporter->Error("%s, at or near \"%s\"", msg, last_tok);
+		}
 
 	return 0;
 	}

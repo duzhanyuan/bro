@@ -1,4 +1,4 @@
-include(BroSubdir)
+include(ZeekSubdir)
 
 include_directories(BEFORE
                     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -9,9 +9,6 @@ if ( ROCKSDB_INCLUDE_DIR )
     add_definitions(-DHAVE_ROCKSDB)
     include_directories(BEFORE ${ROCKSDB_INCLUDE_DIR})
 endif ()
-
-include_directories(BEFORE ${CAF_INCLUDE_DIR_CORE})
-include_directories(BEFORE ${CAF_INCLUDE_DIR_IO})
 
 set(comm_SRCS
     Data.cc

@@ -19,7 +19,7 @@ namespace analyzer { namespace pia {
 // PIAs and then each needs its own matching-state.
 class PIA : public RuleMatcherState {
 public:
-	PIA(analyzer::Analyzer* as_analyzer);
+	explicit PIA(analyzer::Analyzer* as_analyzer);
 	virtual ~PIA();
 
 	// Called when PIA wants to put an Analyzer in charge.  rule is the
@@ -42,7 +42,7 @@ public:
 protected:
 	void PIA_Done();
 	void PIA_DeliverPacket(int len, const u_char* data, bool is_orig,
-				uint64 seq, const IP_Hdr* ip, int caplen, bool clear_state);
+				uint64_t seq, const IP_Hdr* ip, int caplen, bool clear_state);
 
 	enum State { INIT, BUFFERING, MATCHING_ONLY, SKIPPING } state;
 
@@ -53,7 +53,7 @@ protected:
 		const u_char* data;
 		bool is_orig;
 		int len;
-		uint64 seq;
+		uint64_t seq;
 		DataBlock* next;
 	};
 
@@ -66,7 +66,7 @@ protected:
 		State state;
 	};
 
-	void AddToBuffer(Buffer* buffer, uint64 seq, int len,
+	void AddToBuffer(Buffer* buffer, uint64_t seq, int len,
 				const u_char* data, bool is_orig, const IP_Hdr* ip = 0);
 	void AddToBuffer(Buffer* buffer, int len,
 				const u_char* data, bool is_orig, const IP_Hdr* ip = 0);
@@ -90,43 +90,43 @@ private:
 // PIA for UDP.
 class PIA_UDP : public PIA, public analyzer::Analyzer {
 public:
-	PIA_UDP(Connection* conn)
+	explicit PIA_UDP(Connection* conn)
 	: PIA(this), Analyzer("PIA_UDP", conn)
 		{ SetConn(conn); }
-	virtual ~PIA_UDP()	{ }
+	~PIA_UDP() override { }
 
 	static analyzer::Analyzer* Instantiate(Connection* conn)
 		{ return new PIA_UDP(conn); }
 
 protected:
-	virtual void Done()
+	void Done() override
 		{
 		Analyzer::Done();
 		PIA_Done();
 		}
 
-	virtual void DeliverPacket(int len, const u_char* data, bool is_orig,
-					uint64 seq, const IP_Hdr* ip, int caplen)
+	void DeliverPacket(int len, const u_char* data, bool is_orig,
+					uint64_t seq, const IP_Hdr* ip, int caplen) override
 		{
 		Analyzer::DeliverPacket(len, data, is_orig, seq, ip, caplen);
 		PIA_DeliverPacket(len, data, is_orig, seq, ip, caplen, true);
 		}
 
-	virtual void ActivateAnalyzer(analyzer::Tag tag, const Rule* rule);
-	virtual void DeactivateAnalyzer(analyzer::Tag tag);
+	void ActivateAnalyzer(analyzer::Tag tag, const Rule* rule) override;
+	void DeactivateAnalyzer(analyzer::Tag tag) override;
 };
 
 // PIA for TCP.  Accepts both packet and stream input (and reassembles
 // packets before passing payload on to children).
 class PIA_TCP : public PIA, public tcp::TCP_ApplicationAnalyzer {
 public:
-	PIA_TCP(Connection* conn)
+	explicit PIA_TCP(Connection* conn)
 		: PIA(this), tcp::TCP_ApplicationAnalyzer("PIA_TCP", conn)
 		{ stream_mode = false; SetConn(conn); }
 
-	virtual ~PIA_TCP();
+	~PIA_TCP() override;
 
-	virtual void Init();
+	void Init() override;
 
 	// The first packet for each direction of a connection is passed
 	// in here.
@@ -144,25 +144,25 @@ public:
 		{ return new PIA_TCP(conn); }
 
 protected:
-	virtual void Done()
+	void Done() override
 		{
 		Analyzer::Done();
 		PIA_Done();
 		}
 
-	virtual void DeliverPacket(int len, const u_char* data, bool is_orig,
-					uint64 seq, const IP_Hdr* ip, int caplen)
+	void DeliverPacket(int len, const u_char* data, bool is_orig,
+					uint64_t seq, const IP_Hdr* ip, int caplen) override
 		{
 		Analyzer::DeliverPacket(len, data, is_orig, seq, ip, caplen);
 		PIA_DeliverPacket(len, data, is_orig, seq, ip, caplen, false);
 		}
 
-	virtual void DeliverStream(int len, const u_char* data, bool is_orig);
-	virtual void Undelivered(uint64 seq, int len, bool is_orig);
+	void DeliverStream(int len, const u_char* data, bool is_orig) override;
+	void Undelivered(uint64_t seq, int len, bool is_orig) override;
 
-	virtual void ActivateAnalyzer(analyzer::Tag tag,
-					const Rule* rule = 0);
-	virtual void DeactivateAnalyzer(analyzer::Tag tag);
+	void ActivateAnalyzer(analyzer::Tag tag,
+					const Rule* rule = 0) override;
+	void DeactivateAnalyzer(analyzer::Tag tag) override;
 
 private:
 	// FIXME: Not sure yet whether we need both pkt_buffer and stream_buffer.

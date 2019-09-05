@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <stdlib.h>
 
@@ -22,7 +22,6 @@ SteppingStoneEndpoint::SteppingStoneEndpoint(tcp::TCP_Endpoint* e, SteppingStone
 	stp_last_time = stp_resume_time = 0.0;
 	stp_manager = m;
 	stp_id = stp_manager->NextID();
-	stp_key = new HashKey(bro_int_t(stp_id));
 
 	CreateEndpEvent(e->IsOrig());
 
@@ -32,7 +31,6 @@ SteppingStoneEndpoint::SteppingStoneEndpoint(tcp::TCP_Endpoint* e, SteppingStone
 
 SteppingStoneEndpoint::~SteppingStoneEndpoint()
 	{
-	delete stp_key;
 	Unref(endp->TCP()->Conn());
 	}
 
@@ -42,20 +40,19 @@ void SteppingStoneEndpoint::Done()
 		return;
 
 	SteppingStoneEndpoint* ep;
-	IterCookie* cookie;
 
-	cookie = stp_inbound_endps.InitForIteration();
-	while ( (ep = stp_inbound_endps.NextEntry(cookie)) )
+	for ( const auto& entry : stp_inbound_endps )
 		{
-		ep->stp_outbound_endps.Remove(stp_key);
+		ep = entry.second;
+		ep->stp_outbound_endps.erase(stp_id);
 		Event(stp_remove_pair, ep->stp_id, stp_id);
 		Unref(ep);
 		}
 
-	cookie = stp_outbound_endps.InitForIteration();
-	while ( (ep = stp_outbound_endps.NextEntry(cookie)) )
+	for ( const auto& entry : stp_outbound_endps )
 		{
-		ep->stp_inbound_endps.Remove(stp_key);
+		ep = entry.second;
+		ep->stp_inbound_endps.erase(stp_id);
 		Event(stp_remove_pair, stp_id, ep->stp_id);
 		Unref(ep);
 		}
@@ -63,7 +60,7 @@ void SteppingStoneEndpoint::Done()
 	Event(stp_remove_endp, stp_id);
 	}
 
-int SteppingStoneEndpoint::DataSent(double t, uint64 seq, int len, int caplen,
+int SteppingStoneEndpoint::DataSent(double t, uint64_t seq, int len, int caplen,
 		const u_char* data, const IP_Hdr* /* ip */,
 		const struct tcphdr* tp)
 	{
@@ -77,12 +74,11 @@ int SteppingStoneEndpoint::DataSent(double t, uint64 seq, int len, int caplen,
 
 	while ( stp_manager->OrderedEndpoints().length() > 0 )
 		{
-		int f = stp_manager->OrderedEndpoints().front();
+	    auto e = stp_manager->OrderedEndpoints().front();
 
-		if ( stp_manager->OrderedEndpoints()[f]->stp_resume_time < tmin )
+		if ( e->stp_resume_time < tmin )
 			{
-			SteppingStoneEndpoint* e =
-				stp_manager->OrderedEndpoints().pop_front();
+			stp_manager->OrderedEndpoints().pop_front();
 			e->Done();
 			Unref(e);
 			}
@@ -90,8 +86,8 @@ int SteppingStoneEndpoint::DataSent(double t, uint64 seq, int len, int caplen,
 			break;
 		}
 
-	uint64 ack = endp->ToRelativeSeqSpace(endp->AckSeq(), endp->AckWraps());
-	uint64 top_seq = seq + len;
+	uint64_t ack = endp->ToRelativeSeqSpace(endp->AckSeq(), endp->AckWraps());
+	uint64_t top_seq = seq + len;
 
 	if ( top_seq <= ack || top_seq <= stp_max_top_seq )
 		// There is no new data in this packet
@@ -109,16 +105,15 @@ int SteppingStoneEndpoint::DataSent(double t, uint64 seq, int len, int caplen,
 	stp_last_time = stp_resume_time = t;
 
 	Event(stp_resume_endp, stp_id);
-	loop_over_queue(stp_manager->OrderedEndpoints(), i)
+	for ( auto ep : stp_manager->OrderedEndpoints() )
 		{
-		SteppingStoneEndpoint* ep = stp_manager->OrderedEndpoints()[i];
 		if ( ep->endp->TCP() != endp->TCP() )
 			{
 			Ref(ep);
 			Ref(this);
 
-			stp_inbound_endps.Insert(ep->stp_key, ep);
-			ep->stp_outbound_endps.Insert(stp_key, this);
+			stp_inbound_endps[ep->stp_id] = ep;
+			ep->stp_outbound_endps[stp_id] = this;
 
 			Event(stp_correlate_pair, ep->stp_id, stp_id);
 			}
@@ -139,25 +134,23 @@ void SteppingStoneEndpoint::Event(EventHandlerPtr f, int id1, int id2)
 	if ( ! f )
 		return;
 
-	val_list* vl = new val_list;
-
-	vl->append(new Val(id1, TYPE_INT));
-
 	if ( id2 >= 0 )
-		vl->append(new Val(id2, TYPE_INT));
+		endp->TCP()->ConnectionEventFast(f, {val_mgr->GetInt(id1), val_mgr->GetInt(id2)});
+	else
+		endp->TCP()->ConnectionEventFast(f, {val_mgr->GetInt(id1)});
 
-	endp->TCP()->ConnectionEvent(f, vl);
 	}
 
 void SteppingStoneEndpoint::CreateEndpEvent(int is_orig)
 	{
-	val_list* vl = new val_list;
+	if ( ! stp_create_endp )
+		return;
 
-	vl->append(endp->TCP()->BuildConnVal());
-	vl->append(new Val(stp_id, TYPE_INT));
-	vl->append(new Val(is_orig, TYPE_BOOL));
-
-	endp->TCP()->ConnectionEvent(stp_create_endp, vl);
+	endp->TCP()->ConnectionEventFast(stp_create_endp, {
+		endp->TCP()->BuildConnVal(),
+		val_mgr->GetInt(stp_id),
+		val_mgr->GetBool(is_orig),
+	});
 	}
 
 SteppingStone_Analyzer::SteppingStone_Analyzer(Connection* c)
@@ -179,7 +172,7 @@ void SteppingStone_Analyzer::Init()
 	}
 
 void SteppingStone_Analyzer::DeliverPacket(int len, const u_char* data,
-						bool is_orig, uint64 seq,
+						bool is_orig, uint64_t seq,
 						const IP_Hdr* ip, int caplen)
 	{
 	tcp::TCP_ApplicationAnalyzer::DeliverPacket(len, data, is_orig, seq,

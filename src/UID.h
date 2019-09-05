@@ -28,7 +28,7 @@ public:
 	 * Construct a UID of a given bit-length, optionally from given values.
 	 * @see UID::Set
 	 */
-	UID(bro_uint_t bits, const uint64* v = 0, size_t n = 0)
+	explicit UID(bro_uint_t bits, const uint64_t* v = 0, size_t n = 0)
 		{ Set(bits, v, n); }
 
 	/**
@@ -37,7 +37,7 @@ public:
 	UID(const UID& other);
 
 	/**
-	 * Inititialize a UID of a given bit-length, optionally from given values.
+	 * Initialize a UID of a given bit-length, optionally from given values.
 	 * @param bits The desired length in bits of the UID, up to a max of
 	 *             BRO_UID_LEN * 64.
 	 * @param v A pointer to an array of values with which to initialize the
@@ -47,7 +47,7 @@ public:
 	 *          64, then a value is truncated to bit in desired bit-length.
 	 * @param n number of 64-bit elements in array pointed to by \a v.
 	 */
-	void Set(bro_uint_t bits, const uint64* v = 0, size_t n = 0);
+	void Set(bro_uint_t bits, const uint64_t* v = 0, size_t n = 0);
 
 	/**
 	 * Returns a base62 (characters 0-9, A-Z, a-z) representation of the UID.
@@ -59,9 +59,8 @@ public:
 	/**
 	 * @return false if the UID instance was created via the default ctor
 	 *         and not yet initialized w/ Set().
-	 * TODO: this would be better as an "explicit" conversion operator (C++11)
 	 */
-	operator bool() const
+	explicit operator bool() const
 		{ return initialized; }
 
 	/**
@@ -82,7 +81,7 @@ public:
 		{ return ! ( u1 == u2 ); }
 
 private:
-	uint64 uid[BRO_UID_LEN];
+	uint64_t uid[BRO_UID_LEN];
 	bool initialized; // Since technically uid == 0 is a legit UID
 };
 

@@ -101,7 +101,7 @@ refine flow SSH_Flow += {
 			}
 
 
-		result->Assign(6, new Val(${msg.is_orig}, TYPE_BOOL));
+		result->Assign(6, val_mgr->GetBool(!${msg.is_orig}));
 
 		BifEvent::generate_ssh_capabilities(connection()->bro_analyzer(),
 			connection()->bro_analyzer()->Conn(), bytestring_to_val(${msg.cookie}),
@@ -172,6 +172,18 @@ refine flow SSH_Flow += {
 		%{
 		connection()->bro_analyzer()->ProtocolConfirmation();
 		return true;
+		%}
+
+	function get_kex_length(v: int, packet_length: uint32): int
+		%{
+		switch (v) {
+			case SSH1:
+				return packet_length + 4 + 8 - (packet_length % 8);
+			case SSH2:
+				return packet_length + 4;
+			default:
+				return 1; //currently causes the rest of the packet to dump
+		}
 		%}
 };
 

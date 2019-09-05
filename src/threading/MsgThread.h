@@ -181,6 +181,7 @@ protected:
 	friend class HeartbeatMessage;
 	friend class FinishMessage;
 	friend class FinishedMessage;
+	friend class KillMeMessage;
 
 	/**
 	 * Pops a message sent by the child from the child-to-main queue.
@@ -339,7 +340,7 @@ protected:
 	 * @param arg_name A descriptive name for the type of message. Used
 	 * mainly for debugging purposes.
 	 */
-	Message(const char* arg_name)
+	explicit Message(const char* arg_name)
 		{ name = copy_string(arg_name); }
 
 private:
@@ -358,7 +359,7 @@ protected:
 	 * @param name A descriptive name for the type of message. Used
 	 * mainly for debugging purposes.
 	 */
-	BasicInputMessage(const char* name) : Message(name)	{}
+	explicit BasicInputMessage(const char* name) : Message(name)	{}
 };
 
 /**
@@ -373,7 +374,7 @@ protected:
 	 * @param name A descriptive name for the type of message. Used
 	 * mainly for debugging purposes.
 	 */
-	BasicOutputMessage(const char* name) : Message(name)	{}
+	explicit BasicOutputMessage(const char* name) : Message(name)	{}
 };
 
 /**

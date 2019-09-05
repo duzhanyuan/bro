@@ -2,8 +2,8 @@
 
 
 #include "SerialTypes.h"
-#include "../RemoteSerializer.h"
-
+#include "SerializationFormat.h"
+#include "Reporter.h"
 
 using namespace threading;
 
@@ -87,11 +87,16 @@ string Field::TypeName() const
 
 Value::~Value()
 	{
-	if ( (type == TYPE_ENUM || type == TYPE_STRING || type == TYPE_FILE || type == TYPE_FUNC)
-	     && present )
+	if ( ! present )
+		return;
+
+	if ( type == TYPE_ENUM || type == TYPE_STRING || type == TYPE_FILE || type == TYPE_FUNC )
 		delete [] val.string_val.data;
 
-	if ( type == TYPE_TABLE && present )
+	else if ( type == TYPE_PATTERN )
+		delete [] val.pattern_text_val;
+
+	else if ( type == TYPE_TABLE )
 		{
 		for ( int i = 0; i < val.set_val.size; i++ )
 			delete val.set_val.vals[i];
@@ -99,7 +104,7 @@ Value::~Value()
 		delete [] val.set_val.vals;
 		}
 
-	if ( type == TYPE_VECTOR && present )
+	else if ( type == TYPE_VECTOR )
 		{
 		for ( int i = 0; i < val.vector_val.size; i++ )
 			delete val.vector_val.vals[i];
@@ -161,12 +166,13 @@ bool Value::IsCompatibleType(BroType* t, bool atomic_only)
 
 bool Value::Read(SerializationFormat* fmt)
 	{
-	int ty;
+	int ty, sty;
 
-	if ( ! (fmt->Read(&ty, "type") && fmt->Read(&present, "present")) )
+	if ( ! (fmt->Read(&ty, "type") && fmt->Read(&sty, "subtype") && fmt->Read(&present, "present")) )
 		return false;
 
 	type = (TypeTag)(ty);
+	subtype = (TypeTag)(sty);
 
 	if ( ! present )
 		return true;
@@ -311,6 +317,7 @@ bool Value::Read(SerializationFormat* fmt)
 bool Value::Write(SerializationFormat* fmt) const
 	{
 	if ( ! (fmt->Write((int)type, "type") &&
+		fmt->Write((int)subtype, "subtype") &&
 		fmt->Write(present, "present")) )
 		return false;
 
@@ -412,4 +419,3 @@ bool Value::Write(SerializationFormat* fmt) const
 
 	return false;
 	}
-

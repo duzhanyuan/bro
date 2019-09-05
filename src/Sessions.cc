@@ -1,7 +1,7 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <arpa/inet.h>
 
@@ -14,17 +14,12 @@
 #include "NetVar.h"
 #include "Sessions.h"
 #include "Reporter.h"
-#include "OSFinger.h"
 
 #include "analyzer/protocol/icmp/ICMP.h"
 #include "analyzer/protocol/udp/UDP.h"
 
 #include "analyzer/protocol/stepping-stone/SteppingStone.h"
 #include "analyzer/protocol/stepping-stone/events.bif.h"
-#include "analyzer/protocol/backdoor/BackDoor.h"
-#include "analyzer/protocol/backdoor/events.bif.h"
-#include "analyzer/protocol/interconn/InterConn.h"
-#include "analyzer/protocol/interconn/events.bif.h"
 #include "analyzer/protocol/arp/ARP.h"
 #include "analyzer/protocol/arp/events.bif.h"
 #include "Discard.h"
@@ -92,20 +87,6 @@ void IPTunnelTimer::Dispatch(double t, int is_expire)
 
 NetSessions::NetSessions()
 	{
-	TypeList* t = new TypeList();
-	t->Append(base_type(TYPE_ADDR));	// source IP address
-	t->Append(base_type(TYPE_ADDR));	// dest IP address
-	t->Append(base_type(TYPE_COUNT));	// source and dest ports
-
-	ch = new CompositeHash(t);
-
-	Unref(t);
-
-	tcp_conns.SetDeleteFunc(bro_obj_delete_func);
-	udp_conns.SetDeleteFunc(bro_obj_delete_func);
-	icmp_conns.SetDeleteFunc(bro_obj_delete_func);
-	fragments.SetDeleteFunc(bro_obj_delete_func);
-
 	if ( stp_correlate_pair )
 		stp_manager = new analyzer::stepping_stone::SteppingStoneManager();
 	else
@@ -120,24 +101,8 @@ NetSessions::NetSessions()
 
 	packet_filter = 0;
 
-	build_backdoor_analyzer =
-		backdoor_stats || rlogin_signature_found ||
-		telnet_signature_found || ssh_signature_found ||
-		root_backdoor_signature_found || ftp_signature_found ||
-		napster_signature_found || kazaa_signature_found ||
-		http_signature_found || http_proxy_signature_found;
-
 	dump_this_packet = 0;
 	num_packets_processed = 0;
-
-	if ( OS_version_found )
-		{
-		SYN_OS_Fingerprinter = new OSFingerprint(SYN_FINGERPRINT_MODE);
-		if ( SYN_OS_Fingerprinter->Error() )
-			exit(1);
-		}
-	else
-		SYN_OS_Fingerprinter = 0;
 
 	if ( pkt_profile_mode && pkt_profile_freq > 0 && pkt_profile_file )
 		pkt_profiler = new PacketProfiler(pkt_profile_mode,
@@ -149,17 +114,26 @@ NetSessions::NetSessions()
 		arp_analyzer = new analyzer::arp::ARP_Analyzer();
 	else
 		arp_analyzer = 0;
+
+	memset(&stats, 0, sizeof(SessionStats));
 	}
 
 NetSessions::~NetSessions()
 	{
-	delete ch;
 	delete packet_filter;
-	delete SYN_OS_Fingerprinter;
 	delete pkt_profiler;
 	Unref(arp_analyzer);
 	delete discarder;
 	delete stp_manager;
+
+	for ( const auto& entry : tcp_conns )
+		Unref(entry.second);
+	for ( const auto& entry : udp_conns )
+		Unref(entry.second);
+	for ( const auto& entry : icmp_conns )
+		Unref(entry.second);
+	for ( const auto& entry : fragments )
+		Unref(entry.second);
 	}
 
 void NetSessions::Done()
@@ -171,11 +145,7 @@ void NetSessions::NextPacket(double t, const Packet* pkt)
 	SegmentProfiler(segment_logger, "dispatching-packet");
 
 	if ( raw_packet )
-		{
-		val_list* vl = new val_list();
-		vl->append(pkt->BuildPktHdrVal());
-		mgr.QueueEvent(raw_packet, vl);
-		}
+		mgr.QueueEventFast(raw_packet, {pkt->BuildPktHdrVal()});
 
 	if ( pkt_profiler )
 		pkt_profiler->ProfilePkt(t, pkt->cap_len);
@@ -193,7 +163,7 @@ void NetSessions::NextPacket(double t, const Packet* pkt)
 		return;
 		}
 
-	uint32 caplen = pkt->cap_len - pkt->hdr_size;
+	uint32_t caplen = pkt->cap_len - pkt->hdr_size;
 
 	if ( pkt->l3_proto == L3_IPV4 )
 		{
@@ -290,7 +260,7 @@ int NetSessions::CheckConnectionTag(Connection* conn)
 	return 1;
 	}
 
-static unsigned int gre_header_len(uint16 flags)
+static unsigned int gre_header_len(uint16_t flags)
 	{
 	unsigned int len = 4;  // Always has 2 byte flags and 2 byte protocol type.
 
@@ -318,10 +288,10 @@ static unsigned int gre_header_len(uint16 flags)
 void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr,
 			       const EncapsulationStack* encapsulation)
 	{
-	uint32 caplen = pkt->cap_len - pkt->hdr_size;
+	uint32_t caplen = pkt->cap_len - pkt->hdr_size;
 	const struct ip* ip4 = ip_hdr->IP4_Hdr();
 
-	uint32 len = ip_hdr->TotalLen();
+	uint32_t len = ip_hdr->TotalLen();
 	if ( len == 0 )
 		{
 		// TCP segmentation offloading can zero out the ip_len field.
@@ -337,11 +307,25 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 		return;
 		}
 
+	// For both of these it is safe to pass ip_hdr because the presence
+	// is guaranteed for the functions that pass data to us.
+	uint16_t ip_hdr_len = ip_hdr->HdrLen();
+	if ( ip_hdr_len > len )
+		{
+		Weird("invalid_IP_header_size", ip_hdr, encapsulation);
+		return;
+		}
+
+	if ( ip_hdr_len > caplen )
+		{
+		Weird("internally_truncated_header", ip_hdr, encapsulation);
+		return;
+		}
+
 	// Ignore if packet matches packet filter.
 	if ( packet_filter && packet_filter->Match(ip_hdr, len, caplen) )
 		 return;
 
-	int ip_hdr_len = ip_hdr->HdrLen();
 	if ( ! ignore_checksums && ip4 &&
 	     ones_complement_checksum((void*) ip4, ip_hdr_len, 0) != 0xffff )
 		{
@@ -381,6 +365,12 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 
 			caplen = len = ip_hdr->TotalLen();
 			ip_hdr_len = ip_hdr->HdrLen();
+
+			if ( ip_hdr_len > len )
+				{
+				Weird("invalid_IP_header_size", ip_hdr, encapsulation);
+				return;
+				}
 			}
 		}
 
@@ -395,11 +385,7 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 		{
 		dump_this_packet = 1;
 		if ( esp_packet )
-			{
-			val_list* vl = new val_list();
-			vl->append(ip_hdr->BuildPktHdrVal());
-			mgr.QueueEvent(esp_packet, vl);
-			}
+			mgr.QueueEventFast(esp_packet, {ip_hdr->BuildPktHdrVal()});
 
 		// Can't do more since upper-layer payloads are going to be encrypted.
 		return;
@@ -419,11 +405,7 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 			}
 
 		if ( mobile_ipv6_message )
-			{
-			val_list* vl = new val_list();
-			vl->append(ip_hdr->BuildPktHdrVal());
-			mgr.QueueEvent(mobile_ipv6_message, vl);
-			}
+			mgr.QueueEvent(mobile_ipv6_message, {ip_hdr->BuildPktHdrVal()});
 
 		if ( ip_hdr->NextProto() != IPPROTO_NONE )
 			Weird("mobility_piggyback", pkt, encapsulation);
@@ -441,7 +423,7 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 	ConnID id;
 	id.src_addr = ip_hdr->SrcAddr();
 	id.dst_addr = ip_hdr->DstAddr();
-	Dictionary* d = 0;
+	ConnectionMap* d = nullptr;
 	BifEnum::Tunnel::Type tunnel_type = BifEnum::Tunnel::IP;
 
 	switch ( proto ) {
@@ -505,29 +487,85 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 			return;
 			}
 
-		uint16 flags_ver = ntohs(*((uint16*)(data + 0)));
-		uint16 proto_typ = ntohs(*((uint16*)(data + 2)));
+		uint16_t flags_ver = ntohs(*((uint16_t*)(data + 0)));
+		uint16_t proto_typ = ntohs(*((uint16_t*)(data + 2)));
 		int gre_version = flags_ver & 0x0007;
 
 		// If a carried packet has ethernet, this will help skip it.
 		unsigned int eth_len = 0;
 		unsigned int gre_len = gre_header_len(flags_ver);
-		unsigned int ppp_len = gre_version == 1 ? 1 : 0;
+		unsigned int ppp_len = gre_version == 1 ? 4 : 0;
+		unsigned int erspan_len = 0;
 
 		if ( gre_version != 0 && gre_version != 1 )
 			{
-			Weird(fmt("unknown_gre_version_%d", gre_version), ip_hdr,
-			      encapsulation);
+			Weird("unknown_gre_version", ip_hdr, encapsulation,
+			      fmt("%d", gre_version));
 			return;
 			}
 
 		if ( gre_version == 0 )
 			{
-			if ( proto_typ == 0x6558 && len > gre_len + 14 )
+			if ( proto_typ == 0x6558 )
 				{
 				// transparent ethernet bridging
-				eth_len = 14;
-				proto_typ = ntohs(*((uint16*)(data + gre_len + 12)));
+				if ( len > gre_len + 14 )
+					{
+					eth_len = 14;
+					proto_typ = ntohs(*((uint16_t*)(data + gre_len + eth_len - 2)));
+					}
+				else
+					{
+					Weird("truncated_GRE", ip_hdr, encapsulation);
+					return;
+					}
+				}
+
+			else if ( proto_typ == 0x88be )
+				{
+				// ERSPAN type II
+				if ( len > gre_len + 14 + 8 )
+					{
+					erspan_len = 8;
+					eth_len = 14;
+					proto_typ = ntohs(*((uint16_t*)(data + gre_len + erspan_len + eth_len - 2)));
+					}
+				else
+					{
+					Weird("truncated_GRE", ip_hdr, encapsulation);
+					return;
+					}
+				}
+
+			else if ( proto_typ == 0x22eb )
+				{
+				// ERSPAN type III
+				if ( len > gre_len + 14 + 12 )
+					{
+					erspan_len = 12;
+					eth_len = 14;
+
+					auto flags = data + erspan_len - 1;
+					bool have_opt_header = ((*flags & 0x01) == 0x01);
+
+					if ( have_opt_header  )
+						{
+						if ( len > gre_len + erspan_len + 8 + eth_len )
+							erspan_len += 8;
+						else
+							{
+							Weird("truncated_GRE", ip_hdr, encapsulation);
+							return;
+							}
+						}
+
+					proto_typ = ntohs(*((uint16_t*)(data + gre_len + erspan_len + eth_len - 2)));
+					}
+				else
+					{
+					Weird("truncated_GRE", ip_hdr, encapsulation);
+					return;
+					}
 				}
 
 			if ( proto_typ == 0x0800 )
@@ -537,8 +575,8 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 			else
 				{
 				// Not IPv4/IPv6 payload.
-				Weird(fmt("unknown_gre_protocol_%" PRIu16, proto_typ), ip_hdr,
-				      encapsulation);
+				Weird("unknown_gre_protocol", ip_hdr, encapsulation,
+				      fmt("%d", proto_typ));
 				return;
 				}
 
@@ -549,7 +587,8 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 			if ( proto_typ != 0x880b )
 				{
 				// Enhanced GRE payload must be PPP.
-				Weird("egre_protocol_type", ip_hdr, encapsulation);
+				Weird("egre_protocol_type", ip_hdr, encapsulation,
+				      fmt("%d", proto_typ));
 				return;
 				}
 			}
@@ -570,7 +609,7 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 			return;
 			}
 
-		if ( len < gre_len + ppp_len + eth_len || caplen < gre_len + ppp_len + eth_len )
+		if ( len < gre_len + ppp_len + eth_len + erspan_len || caplen < gre_len + ppp_len + eth_len + erspan_len )
 			{
 			Weird("truncated_GRE", ip_hdr, encapsulation);
 			return;
@@ -578,7 +617,7 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 
 		if ( gre_version == 1 )
 			{
-			int ppp_proto = *((uint8*)(data + gre_len));
+			uint16_t ppp_proto = ntohs(*((uint16_t*)(data + gre_len + 2)));
 
 			if ( ppp_proto != 0x0021 && ppp_proto != 0x0057 )
 				{
@@ -589,9 +628,9 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 			proto = (ppp_proto == 0x0021) ? IPPROTO_IPV4 : IPPROTO_IPV6;
 			}
 
-		data += gre_len + ppp_len + eth_len;
-		len -= gre_len + ppp_len + eth_len;
-		caplen -= gre_len + ppp_len + eth_len;
+		data += gre_len + ppp_len + eth_len + erspan_len;
+		len -= gre_len + ppp_len + eth_len + erspan_len;
+		caplen -= gre_len + ppp_len + eth_len + erspan_len;
 
 		// Treat GRE tunnel like IP tunnels, fallthrough to logic below now
 		// that GRE header is stripped and only payload packet remains.
@@ -618,9 +657,10 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 		// Check for a valid inner packet first.
 		IP_Hdr* inner = 0;
 		int result = ParseIPPacket(caplen, data, proto, inner);
-		if ( result < 0 )
+		if ( result == -2 )
+			Weird("invalid_inner_IP_version", ip_hdr, encapsulation);
+		else if ( result < 0 )
 			Weird("truncated_inner_IP", ip_hdr, encapsulation);
-
 		else if ( result > 0 )
 			Weird("inner_IP_payload_length_mismatch", ip_hdr, encapsulation);
 
@@ -670,34 +710,31 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 		}
 
 	default:
-		Weird(fmt("unknown_protocol_%d", proto), pkt, encapsulation);
+		Weird("unknown_protocol", pkt, encapsulation, fmt("%d", proto));
 		return;
 	}
 
-	HashKey* h = BuildConnIDHashKey(id);
-	if ( ! h )
-		reporter->InternalError("hash computation failed");
-
-	Connection* conn = 0;
+	ConnIDKey key = BuildConnIDKey(id);
+	Connection* conn = nullptr;
 
 	// FIXME: The following is getting pretty complex. Need to split up
 	// into separate functions.
-	conn = (Connection*) d->Lookup(h);
+	auto it = d->find(key);
+	if ( it != d->end() )
+		conn = it->second;
+
 	if ( ! conn )
 		{
-		conn = NewConn(h, t, &id, data, proto, ip_hdr->FlowLabel(), pkt, encapsulation);
+		conn = NewConn(key, t, &id, data, proto, ip_hdr->FlowLabel(), pkt, encapsulation);
 		if ( conn )
-			d->Insert(h, conn);
+			InsertConnection(d, key, conn);
 		}
 	else
 		{
 		// We already know that connection.
 		int consistent = CheckConnectionTag(conn);
 		if ( consistent < 0 )
-			{
-			delete h;
 			return;
-			}
 
 		if ( ! consistent || conn->IsReuse(t, data) )
 			{
@@ -705,22 +742,18 @@ void NetSessions::DoNextPacket(double t, const Packet* pkt, const IP_Hdr* ip_hdr
 				conn->Event(connection_reused, 0);
 
 			Remove(conn);
-			conn = NewConn(h, t, &id, data, proto, ip_hdr->FlowLabel(), pkt, encapsulation);
+			conn = NewConn(key, t, &id, data, proto, ip_hdr->FlowLabel(), pkt, encapsulation);
 			if ( conn )
-				d->Insert(h, conn);
+				InsertConnection(d, key, conn);
 			}
 		else
 			{
-			delete h;
 			conn->CheckEncapsulation(encapsulation);
 			}
 		}
 
 	if ( ! conn )
-		{
-		delete h;
 		return;
-		}
 
 	int record_packet = 1;	// whether to record the packet at all
 	int record_content = 1;	// whether to record its data
@@ -768,7 +801,7 @@ void NetSessions::DoNextInnerPacket(double t, const Packet* pkt,
 		const IP_Hdr* inner, const EncapsulationStack* prev,
 		const EncapsulatingConn& ec)
 	{
-	uint32 caplen, len;
+	uint32_t caplen, len;
 	caplen = len = inner->TotalLen();
 
 	pkt_timeval ts;
@@ -819,7 +852,10 @@ int NetSessions::ParseIPPacket(int caplen, const u_char* const pkt, int proto,
 		if ( caplen < (int)sizeof(struct ip6_hdr) )
 			return -1;
 
-		inner = new IP_Hdr((const struct ip6_hdr*) pkt, false, caplen);
+		const struct ip6_hdr* ip6 = (const struct ip6_hdr*) pkt;
+		inner = new IP_Hdr(ip6, false, caplen);
+		if ( ( ip6->ip6_ctlun.ip6_un2_vfc & 0xF0 ) != 0x60 )
+			return -2;
 		}
 
 	else if ( proto == IPPROTO_IPV4 )
@@ -827,7 +863,10 @@ int NetSessions::ParseIPPacket(int caplen, const u_char* const pkt, int proto,
 		if ( caplen < (int)sizeof(struct ip) )
 			return -1;
 
-		inner = new IP_Hdr((const struct ip*) pkt, false);
+		const struct ip* ip4 = (const struct ip*) pkt;
+		inner = new IP_Hdr(ip4, false);
+		if ( ip4->ip_v != 4 )
+			return -2;
 		}
 
 	else
@@ -836,16 +875,16 @@ int NetSessions::ParseIPPacket(int caplen, const u_char* const pkt, int proto,
 		return -1;
 		}
 
-	if ( (uint32)caplen != inner->TotalLen() )
-		return (uint32)caplen < inner->TotalLen() ? -1 : 1;
+	if ( (uint32_t)caplen != inner->TotalLen() )
+		return (uint32_t)caplen < inner->TotalLen() ? -1 : 1;
 
 	return 0;
 	}
 
-bool NetSessions::CheckHeaderTrunc(int proto, uint32 len, uint32 caplen,
+bool NetSessions::CheckHeaderTrunc(int proto, uint32_t len, uint32_t caplen,
                                    const Packet* p, const EncapsulationStack* encap)
 	{
-	uint32 min_hdr_len = 0;
+	uint32_t min_hdr_len = 0;
 	switch ( proto ) {
 	case IPPROTO_TCP:
 		min_hdr_len = sizeof(struct tcphdr);
@@ -891,49 +930,26 @@ bool NetSessions::CheckHeaderTrunc(int proto, uint32 len, uint32 caplen,
 FragReassembler* NetSessions::NextFragment(double t, const IP_Hdr* ip,
 					const u_char* pkt)
 	{
-	uint32 frag_id = ip->ID();
+	uint32_t frag_id = ip->ID();
 
-	ListVal* key = new ListVal(TYPE_ANY);
-	key->Append(new AddrVal(ip->SrcAddr()));
-	key->Append(new AddrVal(ip->DstAddr()));
-	key->Append(new Val(frag_id, TYPE_COUNT));
+	FragReassemblerKey key = std::make_tuple(ip->SrcAddr(), ip->DstAddr(), frag_id);
 
-	HashKey* h = ch->ComputeHash(key, 1);
-	if ( ! h )
-		reporter->InternalError("hash computation failed");
+	FragReassembler* f = nullptr;
+	auto it = fragments.find(key);
+	if ( it != fragments.end() )
+		f = it->second;
 
-	FragReassembler* f = fragments.Lookup(h);
 	if ( ! f )
 		{
-		f = new FragReassembler(this, ip, pkt, h, t);
-		fragments.Insert(h, f);
-		Unref(key);
+		f = new FragReassembler(this, ip, pkt, key, t);
+		fragments[key] = f;
+		if ( fragments.size() > stats.max_fragments )
+			stats.max_fragments = fragments.size();
 		return f;
 		}
 
-	delete h;
-	Unref(key);
-
 	f->AddFragment(t, ip, pkt);
 	return f;
-	}
-
-int NetSessions::Get_OS_From_SYN(struct os_type* retval,
-		  uint16 tot, uint8 DF_flag, uint8 TTL, uint16 WSS,
-		  uint8 ocnt, uint8* op, uint16 MSS, uint8 win_scale,
-		  uint32 tstamp, /* uint8 TOS, */ uint32 quirks,
-		  uint8 ECN) const
-	{
-	return SYN_OS_Fingerprinter ?
-		SYN_OS_Fingerprinter->FindMatch(retval, tot, DF_flag, TTL,
-				WSS, ocnt, op, MSS, win_scale, tstamp,
-				quirks, ECN) : 0;
-	}
-
-bool NetSessions::CompareWithPreviousOSMatch(const IPAddr& addr, int id) const
-	{
-	return SYN_OS_Fingerprinter ?
-		SYN_OS_Fingerprinter->CacheMatch(addr, id) : 0;
 	}
 
 Connection* NetSessions::FindConnection(Val* v)
@@ -987,11 +1003,8 @@ Connection* NetSessions::FindConnection(Val* v)
 
 	id.is_one_way = 0;	// ### incorrect for ICMP connections
 
-	HashKey* h = BuildConnIDHashKey(id);
-	if ( ! h )
-		reporter->InternalError("hash computation failed");
-
-	Dictionary* d;
+	ConnIDKey key = BuildConnIDKey(id);
+	ConnectionMap* d;
 
 	if ( orig_portv->IsTCP() )
 		d = &tcp_conns;
@@ -1004,36 +1017,33 @@ Connection* NetSessions::FindConnection(Val* v)
 		// This can happen due to pseudo-connections we
 		// construct, for example for packet headers embedded
 		// in ICMPs.
-		delete h;
 		return 0;
 		}
 
-	Connection* conn = (Connection*) d->Lookup(h);
-
-	delete h;
+	Connection* conn = nullptr;
+	auto it = d->find(key);
+	if ( it != d->end() )
+		conn = it->second;
 
 	return conn;
 	}
 
 void NetSessions::Remove(Connection* c)
 	{
-	HashKey* k = c->Key();
-	if ( k )
+	if ( c->IsKeyValid() )
 		{
+		const ConnIDKey& key = c->Key();
 		c->CancelTimers();
 
-		analyzer::tcp::TCP_Analyzer* ta = (analyzer::tcp::TCP_Analyzer*) c->GetRootAnalyzer();
-		if ( ta && c->ConnTransport() == TRANSPORT_TCP )
+		if ( c->ConnTransport() == TRANSPORT_TCP )
 			{
+			auto ta = static_cast<analyzer::tcp::TCP_Analyzer*>(c->GetRootAnalyzer());
 			assert(ta->IsAnalyzer("TCP"));
 			analyzer::tcp::TCP_Endpoint* to = ta->Orig();
 			analyzer::tcp::TCP_Endpoint* tr = ta->Resp();
 
 			tcp_stats.StateLeft(to->state, tr->state);
 			}
-
-		if ( c->IsPersistent() )
-			persistence_serializer->Unregister(c);
 
 		c->Done();
 
@@ -1047,17 +1057,17 @@ void NetSessions::Remove(Connection* c)
 
 		switch ( c->ConnTransport() ) {
 		case TRANSPORT_TCP:
-			if ( ! tcp_conns.RemoveEntry(k) )
+			if ( tcp_conns.erase(key) == 0 )
 				reporter->InternalWarning("connection missing");
 			break;
 
 		case TRANSPORT_UDP:
-			if ( ! udp_conns.RemoveEntry(k) )
+			if ( udp_conns.erase(key) == 0 )
 				reporter->InternalWarning("connection missing");
 			break;
 
 		case TRANSPORT_ICMP:
-			if ( ! icmp_conns.RemoveEntry(k) )
+			if ( icmp_conns.erase(key) == 0 )
 				reporter->InternalWarning("connection missing");
 			break;
 
@@ -1067,7 +1077,6 @@ void NetSessions::Remove(Connection* c)
 		}
 
 		Unref(c);
-		delete k;
 		}
 	}
 
@@ -1076,42 +1085,38 @@ void NetSessions::Remove(FragReassembler* f)
 	if ( ! f )
 		return;
 
-	HashKey* k = f->Key();
-
-	if ( k )
-		{
-		if ( ! fragments.RemoveEntry(k) )
-			reporter->InternalWarning("fragment reassembler not in dict");
-		}
-	else
-		reporter->InternalWarning("missing fragment reassembler hash key");
+	if ( fragments.erase(f->Key()) == 0 )
+		reporter->InternalWarning("fragment reassembler not in dict");
 
 	Unref(f);
 	}
 
 void NetSessions::Insert(Connection* c)
 	{
-	assert(c->Key());
+	assert(c->IsKeyValid());
 
-	Connection* old = 0;
+	Connection* old = nullptr;
 
 	switch ( c->ConnTransport() ) {
-	// Remove first. Otherwise the dictioanry would still
-	// reference the old key for already existing connections.
+	// Remove first. Otherwise the map would still reference the old key for
+	// already existing connections.
 
 	case TRANSPORT_TCP:
-		old = (Connection*) tcp_conns.Remove(c->Key());
-		tcp_conns.Insert(c->Key(), c);
+		old = LookupConn(tcp_conns, c->Key());
+		tcp_conns.erase(c->Key());
+		InsertConnection(&tcp_conns, c->Key(), c);
 		break;
 
 	case TRANSPORT_UDP:
-		old = (Connection*) udp_conns.Remove(c->Key());
-		udp_conns.Insert(c->Key(), c);
+		old = LookupConn(udp_conns, c->Key());
+		udp_conns.erase(c->Key());
+		InsertConnection(&udp_conns, c->Key(), c);
 		break;
 
 	case TRANSPORT_ICMP:
-		old = (Connection*) icmp_conns.Remove(c->Key());
-		icmp_conns.Insert(c->Key(), c);
+		old = LookupConn(icmp_conns, c->Key());
+		icmp_conns.erase(c->Key());
+		InsertConnection(&icmp_conns, c->Key(), c);
 		break;
 
 	default:
@@ -1125,9 +1130,6 @@ void NetSessions::Insert(Connection* c)
 		// Some clean-ups similar to those in Remove() (but invisible
 		// to the script layer).
 		old->CancelTimers();
-		if ( old->IsPersistent() )
-			persistence_serializer->Unregister(old);
-		delete old->Key();
 		old->ClearKey();
 		Unref(old);
 		}
@@ -1135,29 +1137,23 @@ void NetSessions::Insert(Connection* c)
 
 void NetSessions::Drain()
 	{
-	IterCookie* cookie = tcp_conns.InitForIteration();
-	Connection* tc;
-
-	while ( (tc = tcp_conns.NextEntry(cookie)) )
+	for ( const auto& entry : tcp_conns )
 		{
+		Connection* tc = entry.second;
 		tc->Done();
 		tc->Event(connection_state_remove, 0);
 		}
 
-	cookie = udp_conns.InitForIteration();
-	Connection* uc;
-
-	while ( (uc = udp_conns.NextEntry(cookie)) )
+	for ( const auto& entry : udp_conns )
 		{
+		Connection* uc = entry.second;
 		uc->Done();
 		uc->Event(connection_state_remove, 0);
 		}
 
-	cookie = icmp_conns.InitForIteration();
-	Connection* ic;
-
-	while ( (ic = icmp_conns.NextEntry(cookie)) )
+	for ( const auto& entry : icmp_conns )
 		{
+		Connection* ic = entry.second;
 		ic->Done();
 		ic->Event(connection_state_remove, 0);
 		}
@@ -1167,23 +1163,23 @@ void NetSessions::Drain()
 
 void NetSessions::GetStats(SessionStats& s) const
 	{
-	s.num_TCP_conns = tcp_conns.Length();
-	s.cumulative_TCP_conns = tcp_conns.NumCumulativeInserts();
-	s.num_UDP_conns = udp_conns.Length();
-	s.cumulative_UDP_conns = udp_conns.NumCumulativeInserts();
-	s.num_ICMP_conns = icmp_conns.Length();
-	s.cumulative_ICMP_conns = icmp_conns.NumCumulativeInserts();
-	s.num_fragments = fragments.Length();
+	s.num_TCP_conns = tcp_conns.size();
+	s.cumulative_TCP_conns = stats.cumulative_TCP_conns;
+	s.num_UDP_conns = udp_conns.size();
+	s.cumulative_UDP_conns = stats.cumulative_UDP_conns;
+	s.num_ICMP_conns = icmp_conns.size();
+	s.cumulative_ICMP_conns = stats.cumulative_ICMP_conns;
+	s.num_fragments = fragments.size();
 	s.num_packets = num_packets_processed;
 
-	s.max_TCP_conns = tcp_conns.MaxLength();
-	s.max_UDP_conns = udp_conns.MaxLength();
-	s.max_ICMP_conns = icmp_conns.MaxLength();
-	s.max_fragments = fragments.MaxLength();
+	s.max_TCP_conns = stats.max_TCP_conns;
+	s.max_UDP_conns = stats.max_UDP_conns;
+	s.max_ICMP_conns = stats.max_ICMP_conns;
+	s.max_fragments = stats.max_fragments;
 	}
 
-Connection* NetSessions::NewConn(HashKey* k, double t, const ConnID* id,
-					const u_char* data, int proto, uint32 flow_label,
+Connection* NetSessions::NewConn(const ConnIDKey& k, double t, const ConnID* id,
+					const u_char* data, int proto, uint32_t flow_label,
 					const Packet* pkt, const EncapsulationStack* encapsulation)
 	{
 	// FIXME: This should be cleaned up a bit, it's too protocol-specific.
@@ -1246,19 +1242,28 @@ Connection* NetSessions::NewConn(HashKey* k, double t, const ConnID* id,
 		{
 		conn->Event(new_connection, 0);
 
-		if ( external )
+		if ( external && connection_external )
 			{
-			val_list* vl = new val_list(2);
-			vl->append(conn->BuildConnVal());
-			vl->append(new StringVal(conn->GetTimerMgr()->GetTag().c_str()));
-			conn->ConnectionEvent(connection_external, 0, vl);
+			conn->ConnectionEventFast(connection_external, 0, {
+				conn->BuildConnVal(),
+				new StringVal(conn->GetTimerMgr()->GetTag().c_str()),
+			});
 			}
 		}
 
 	return conn;
 	}
 
-bool NetSessions::IsLikelyServerPort(uint32 port, TransportProto proto) const
+Connection* NetSessions::LookupConn(const ConnectionMap& conns, const ConnIDKey& key)
+	{
+	auto it = conns.find(key);
+	if ( it != conns.end() )
+		return it->second;
+
+	return nullptr;
+	}
+
+bool NetSessions::IsLikelyServerPort(uint32_t port, TransportProto proto) const
 	{
 	// We keep a cached in-core version of the table to speed up the lookup.
 	static set<bro_uint_t> port_cache;
@@ -1285,9 +1290,9 @@ bool NetSessions::IsLikelyServerPort(uint32 port, TransportProto proto) const
 	return port_cache.find(port) != port_cache.end();
 	}
 
-bool NetSessions::WantConnection(uint16 src_port, uint16 dst_port,
+bool NetSessions::WantConnection(uint16_t src_port, uint16_t dst_port,
 					TransportProto transport_proto,
-					uint8 tcp_flags, bool& flip_roles)
+					uint8_t tcp_flags, bool& flip_roles)
 	{
 	flip_roles = false;
 
@@ -1378,7 +1383,7 @@ void NetSessions::DumpPacket(const Packet *pkt, int len)
 
 	if ( len != 0 )
 		{
-		if ( (uint32)len > pkt->cap_len )
+		if ( (uint32_t)len > pkt->cap_len )
 			reporter->Warning("bad modified caplen");
 		else
 			const_cast<Packet *>(pkt)->cap_len = len;
@@ -1388,25 +1393,25 @@ void NetSessions::DumpPacket(const Packet *pkt, int len)
 	}
 
 void NetSessions::Weird(const char* name, const Packet* pkt,
-                        const EncapsulationStack* encap)
+                        const EncapsulationStack* encap, const char* addl)
 	{
 	if ( pkt )
 		dump_this_packet = 1;
 
 	if ( encap && encap->LastType() != BifEnum::Tunnel::NONE )
-		reporter->Weird(fmt("%s_in_tunnel", name));
+		reporter->Weird(fmt("%s_in_tunnel", name), addl);
 	else
-		reporter->Weird(name);
+		reporter->Weird(name, addl);
 	}
 
 void NetSessions::Weird(const char* name, const IP_Hdr* ip,
-                        const EncapsulationStack* encap)
+                        const EncapsulationStack* encap, const char* addl)
 	{
 	if ( encap && encap->LastType() != BifEnum::Tunnel::NONE )
 		reporter->Weird(ip->SrcAddr(), ip->DstAddr(),
-		                fmt("%s_in_tunnel", name));
+		                fmt("%s_in_tunnel", name), addl);
 	else
-		reporter->Weird(ip->SrcAddr(), ip->DstAddr(), name);
+		reporter->Weird(ip->SrcAddr(), ip->DstAddr(), name, addl);
 	}
 
 unsigned int NetSessions::ConnectionMemoryUsage()
@@ -1417,23 +1422,14 @@ unsigned int NetSessions::ConnectionMemoryUsage()
 		// Connections have been flushed already.
 		return 0;
 
-	IterCookie* cookie = tcp_conns.InitForIteration();
-	Connection* tc;
+	for ( const auto& entry : tcp_conns )
+		mem += entry.second->MemoryAllocation();
 
-	while ( (tc = tcp_conns.NextEntry(cookie)) )
-		mem += tc->MemoryAllocation();
+	for ( const auto& entry : udp_conns )
+		mem += entry.second->MemoryAllocation();
 
-	cookie = udp_conns.InitForIteration();
-	Connection* uc;
-
-	while ( (uc = udp_conns.NextEntry(cookie)) )
-		mem += uc->MemoryAllocation();
-
-	cookie = icmp_conns.InitForIteration();
-	Connection* ic;
-
-	while ( (ic = icmp_conns.NextEntry(cookie)) )
-		mem += ic->MemoryAllocation();
+	for ( const auto& entry : icmp_conns )
+		mem += entry.second->MemoryAllocation();
 
 	return mem;
 	}
@@ -1446,23 +1442,14 @@ unsigned int NetSessions::ConnectionMemoryUsageConnVals()
 		// Connections have been flushed already.
 		return 0;
 
-	IterCookie* cookie = tcp_conns.InitForIteration();
-	Connection* tc;
+	for ( const auto& entry : tcp_conns )
+		mem += entry.second->MemoryAllocationConnVal();
 
-	while ( (tc = tcp_conns.NextEntry(cookie)) )
-		mem += tc->MemoryAllocationConnVal();
+	for ( const auto& entry : udp_conns )
+		mem += entry.second->MemoryAllocationConnVal();
 
-	cookie = udp_conns.InitForIteration();
-	Connection* uc;
-
-	while ( (uc = udp_conns.NextEntry(cookie)) )
-		mem += uc->MemoryAllocationConnVal();
-
-	cookie = icmp_conns.InitForIteration();
-	Connection* ic;
-
-	while ( (ic = icmp_conns.NextEntry(cookie)) )
-		mem += ic->MemoryAllocationConnVal();
+	for ( const auto& entry : icmp_conns )
+		mem += entry.second->MemoryAllocationConnVal();
 
 	return mem;
 	}
@@ -1475,17 +1462,35 @@ unsigned int NetSessions::MemoryAllocation()
 
 	return ConnectionMemoryUsage()
 		+ padded_sizeof(*this)
-		+ ch->MemoryAllocation()
-		// must take care we don't count the HaskKeys twice.
-		+ tcp_conns.MemoryAllocation() - padded_sizeof(tcp_conns) -
-		// 12 is sizeof(Key) from ConnID::BuildConnKey();
-		// it can't be (easily) accessed here. :-(
-			(tcp_conns.Length() * pad_size(12))
-		+ udp_conns.MemoryAllocation() - padded_sizeof(udp_conns) -
-			(udp_conns.Length() * pad_size(12))
-		+ icmp_conns.MemoryAllocation() - padded_sizeof(icmp_conns) -
-			(icmp_conns.Length() * pad_size(12))
-		+ fragments.MemoryAllocation() - padded_sizeof(fragments)
+		+ (tcp_conns.size() * (sizeof(ConnectionMap::key_type) + sizeof(ConnectionMap::value_type)))
+		+ (udp_conns.size() * (sizeof(ConnectionMap::key_type) + sizeof(ConnectionMap::value_type)))
+		+ (icmp_conns.size() * (sizeof(ConnectionMap::key_type) + sizeof(ConnectionMap::value_type)))
+		+ (fragments.size() * (sizeof(FragmentMap::key_type) + sizeof(FragmentMap::value_type)))
 		// FIXME: MemoryAllocation() not implemented for rest.
 		;
+	}
+
+void NetSessions::InsertConnection(ConnectionMap* m, const ConnIDKey& key, Connection* conn)
+	{
+	(*m)[key] = conn;
+
+	switch ( conn->ConnTransport() )
+		{
+		case TRANSPORT_TCP:
+			stats.cumulative_TCP_conns++;
+			if ( m->size() > stats.max_TCP_conns )
+				stats.max_TCP_conns = m->size();
+			break;
+		case TRANSPORT_UDP:
+			stats.cumulative_UDP_conns++;
+			if ( m->size() > stats.max_UDP_conns )
+				stats.max_UDP_conns = m->size();
+			break;
+		case TRANSPORT_ICMP:
+			stats.cumulative_ICMP_conns++;
+			if ( m->size() > stats.max_ICMP_conns )
+				stats.max_ICMP_conns = m->size();
+			break;
+		default: break;
+		}
 	}

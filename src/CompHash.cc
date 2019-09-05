@@ -1,11 +1,14 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "CompHash.h"
 #include "Val.h"
 #include "Reporter.h"
 #include "Func.h"
+
+#include <vector>
+#include <map>
 
 CompositeHash::CompositeHash(TypeList* composite_type)
 	{
@@ -108,7 +111,7 @@ char* CompositeHash::SingleValHash(int type_check, char* kp0,
 
 	case TYPE_INTERNAL_ADDR:
 		{
-		uint32* kp = AlignAndPadType<uint32>(kp0);
+		uint32_t* kp = AlignAndPadType<uint32_t>(kp0);
 		v->AsAddr().CopyIPv6(kp);
 		kp1 = reinterpret_cast<char*>(kp+4);
 		}
@@ -116,7 +119,7 @@ char* CompositeHash::SingleValHash(int type_check, char* kp0,
 
 	case TYPE_INTERNAL_SUBNET:
 		{
-		uint32* kp = AlignAndPadType<uint32>(kp0);
+		uint32_t* kp = AlignAndPadType<uint32_t>(kp0);
 		v->AsSubNet().Prefix().CopyIPv6(kp);
 		kp[4] = v->AsSubNet().Length();
 		kp1 = reinterpret_cast<char*>(kp+5);
@@ -137,7 +140,7 @@ char* CompositeHash::SingleValHash(int type_check, char* kp0,
 		switch ( v->Type()->Tag() ) {
 		case TYPE_FUNC:
 			{
-			uint32* kp = AlignAndPadType<uint32>(kp0);
+			uint32_t* kp = AlignAndPadType<uint32_t>(kp0);
 			*kp = v->AsFunc()->GetUniqueFuncID();
 			kp1 = reinterpret_cast<char*>(kp+1);
 			break;
@@ -174,12 +177,44 @@ char* CompositeHash::SingleValHash(int type_check, char* kp0,
 			{
 			int* kp = AlignAndPadType<int>(kp0);
 			TableVal* tv = v->AsTableVal();
-			ListVal* lv = tv->ConvertToList();
 			*kp = tv->Size();
 			kp1 = reinterpret_cast<char*>(kp+1);
-			for ( int i = 0; i < tv->Size(); ++i )
+
+			auto tbl = tv->AsTable();
+			auto it = tbl->InitForIteration();
+			ListVal* lv = new ListVal(TYPE_ANY);
+
+			struct HashKeyComparer {
+				bool operator()(const HashKey* a, const HashKey* b) const
+					{
+					if ( a->Hash() != b->Hash() )
+						return a->Hash() < b->Hash();
+					if ( a->Size() != b->Size() )
+						return a->Size() < b->Size();
+					return strncmp(static_cast<const char*>(a->Key()),
+					               static_cast<const char*>(b->Key()),
+					               a->Size()) < 0;
+					}
+			};
+
+			std::map<HashKey*, int, HashKeyComparer> hashkeys;
+			HashKey* k;
+			auto idx = 0;
+
+			while ( tbl->NextEntry(k, it) )
 				{
-				Val* key = lv->Index(i);
+				hashkeys[k] = idx++;
+				lv->Append(tv->RecoverIndex(k));
+				}
+
+			for ( auto& kv : hashkeys )
+				delete kv.first;
+
+			for ( auto& kv : hashkeys )
+				{
+				auto idx = kv.second;
+				Val* key = lv->Index(idx);
+
 				if ( ! (kp1 = SingleValHash(type_check, kp1, key->Type(), key,
 				                            false)) )
 					{
@@ -404,13 +439,13 @@ int CompositeHash::SingleTypeKeySize(BroType* bt, const Val* v,
 		break;
 
 	case TYPE_INTERNAL_ADDR:
-		sz = SizeAlign(sz, sizeof(uint32));
-		sz += sizeof(uint32) * 3;	// to make a total of 4 words
+		sz = SizeAlign(sz, sizeof(uint32_t));
+		sz += sizeof(uint32_t) * 3;	// to make a total of 4 words
 		break;
 
 	case TYPE_INTERNAL_SUBNET:
-		sz = SizeAlign(sz, sizeof(uint32));
-		sz += sizeof(uint32) * 4;	// to make a total of 5 words
+		sz = SizeAlign(sz, sizeof(uint32_t));
+		sz += sizeof(uint32_t) * 4;	// to make a total of 5 words
 		break;
 
 	case TYPE_INTERNAL_DOUBLE:
@@ -423,7 +458,7 @@ int CompositeHash::SingleTypeKeySize(BroType* bt, const Val* v,
 		switch ( bt->Tag() ) {
 		case TYPE_FUNC:
 			{
-			sz = SizeAlign(sz, sizeof(uint32));
+			sz = SizeAlign(sz, sizeof(uint32_t));
 			break;
 			}
 
@@ -640,10 +675,10 @@ ListVal* CompositeHash::RecoverVals(const HashKey* k) const
 	const char* kp = (const char*) k->Key();
 	const char* const k_end = kp + k->Size();
 
-	loop_over_list(*tl, i)
+	for ( const auto& type : *tl )
 		{
-		Val* v;
-		kp = RecoverOneVal(k, kp, k_end, (*tl)[i], v, false);
+		Val* v = nullptr;
+		kp = RecoverOneVal(k, kp, k_end, type, v, false);
 		ASSERT(v);
 		l->Append(v);
 		}
@@ -685,9 +720,16 @@ const char* CompositeHash::RecoverOneVal(const HashKey* k, const char* kp0,
 		kp1 = reinterpret_cast<const char*>(kp+1);
 
 		if ( tag == TYPE_ENUM )
-			pval = new EnumVal(*kp, t->AsEnumType());
+			pval = t->AsEnumType()->GetVal(*kp);
+		else if ( tag == TYPE_BOOL )
+			pval = val_mgr->GetBool(*kp);
+		else if ( tag == TYPE_INT )
+			pval = val_mgr->GetInt(*kp);
 		else
-			pval = new Val(*kp, tag);
+			{
+			reporter->InternalError("bad internal unsigned int in CompositeHash::RecoverOneVal()");
+			pval = 0;
+			}
 		}
 		break;
 
@@ -699,11 +741,11 @@ const char* CompositeHash::RecoverOneVal(const HashKey* k, const char* kp0,
 		switch ( tag ) {
 		case TYPE_COUNT:
 		case TYPE_COUNTER:
-			pval = new Val(*kp, tag);
+			pval = val_mgr->GetCount(*kp);
 			break;
 
 		case TYPE_PORT:
-			pval = new PortVal(*kp);
+			pval = val_mgr->GetPort(*kp);
 			break;
 
 		default:
@@ -728,7 +770,7 @@ const char* CompositeHash::RecoverOneVal(const HashKey* k, const char* kp0,
 
 	case TYPE_INTERNAL_ADDR:
 		{
-		const uint32* const kp = AlignType<uint32>(kp0);
+		const uint32_t* const kp = AlignType<uint32_t>(kp0);
 		kp1 = reinterpret_cast<const char*>(kp+4);
 
 		IPAddr addr(IPv6, kp, IPAddr::Network);
@@ -748,7 +790,7 @@ const char* CompositeHash::RecoverOneVal(const HashKey* k, const char* kp0,
 
 	case TYPE_INTERNAL_SUBNET:
 		{
-		const uint32* const kp = AlignType<uint32>(kp0);
+		const uint32_t* const kp = AlignType<uint32_t>(kp0);
 		kp1 = reinterpret_cast<const char*>(kp+5);
 		pval = new SubNetVal(kp, kp[4]);
 		}
@@ -760,7 +802,7 @@ const char* CompositeHash::RecoverOneVal(const HashKey* k, const char* kp0,
 		switch ( t->Tag() ) {
 		case TYPE_FUNC:
 			{
-			const uint32* const kp = AlignType<uint32>(kp0);
+			const uint32_t* const kp = AlignType<uint32_t>(kp0);
 			kp1 = reinterpret_cast<const char*>(kp+1);
 
 			Func* f = Func::GetFuncPtrByID(*kp);

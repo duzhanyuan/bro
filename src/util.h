@@ -3,6 +3,15 @@
 #ifndef util_h
 #define util_h
 
+#ifdef __GNUC__
+    #define ZEEK_DEPRECATED(msg) __attribute__ ((deprecated(msg)))
+#elif defined(_MSC_VER)
+    #define ZEEK_DEPRECATED(msg) __declspec(deprecated(msg)) func
+#else
+	#pragma message("Warning: ZEEK_DEPRECATED macro not implemented")
+	#define ZEEK_DEPRECATED(msg)
+#endif
+
 // Expose C99 functionality from inttypes.h, which would otherwise not be
 // available in C++.
 #ifndef __STDC_FORMAT_MACROS
@@ -13,18 +22,20 @@
 #define __STDC_LIMIT_MACROS
 #endif
 
-#include <inttypes.h>
-#include <stdint.h>
+#include <cinttypes>
+#include <cstdint>
 
 #include <string>
+#include <array>
 #include <vector>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <libgen.h>
+#include <memory> // std::unique_ptr
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "siphash24.h"
 
 #ifdef DEBUG
@@ -51,35 +62,43 @@ extern HeapLeakChecker* heap_checker;
 
 #include <stdint.h>
 
+ZEEK_DEPRECATED("Remove in v4.1. Use uint64_t instead.")
 typedef uint64_t uint64;
+ZEEK_DEPRECATED("Remove in v4.1. Use uint32_t instead.")
 typedef uint32_t uint32;
+ZEEK_DEPRECATED("Remove in v4.1. Use uint16_t instead.")
 typedef uint16_t uint16;
+ZEEK_DEPRECATED("Remove in v4.1. Use uint8_t instead.")
 typedef uint8_t uint8;
 
+ZEEK_DEPRECATED("Remove in v4.1. Use int64_t instead.")
 typedef int64_t int64;
+ZEEK_DEPRECATED("Remove in v4.1. Use int32_t instead.")
 typedef int32_t int32;
+ZEEK_DEPRECATED("Remove in v4.1. Use int16_t instead.")
 typedef int16_t int16;
+ZEEK_DEPRECATED("Remove in v4.1. Use int8_t instead.")
 typedef int8_t int8;
 
-typedef int64 bro_int_t;
-typedef uint64 bro_uint_t;
+typedef int64_t bro_int_t;
+typedef uint64_t bro_uint_t;
 
 // "ptr_compat_uint" and "ptr_compat_int" are (un)signed integers of
 // pointer size. They can be cast safely to a pointer, e.g. in Lists,
 // which represent their entities as void* pointers.
 //
 #if SIZEOF_VOID_P == 8
-typedef uint64 ptr_compat_uint;
-typedef int64 ptr_compat_int;
+typedef uint64_t ptr_compat_uint;
+typedef int64_t ptr_compat_int;
 #define PRI_PTR_COMPAT_INT PRId64 // Format to use with printf.
 #define PRI_PTR_COMPAT_UINT PRIu64
 #elif SIZEOF_VOID_P == 4
-typedef uint32 ptr_compat_uint;
-typedef int32 ptr_compat_int;
+typedef uint32_t ptr_compat_uint;
+typedef int32_t ptr_compat_int;
 #define PRI_PTR_COMPAT_INT PRId32
 #define PRI_PTR_COMPAT_UINT PRIu32
 #else
-# error "Unusual pointer size. Please report to bro@bro.org."
+# error "Unsupported pointer size."
 #endif
 
 extern "C"
@@ -146,7 +165,7 @@ extern char* strcasestr(const char* s, const char* find);
 #endif
 extern const char* strpbrk_n(size_t len, const char* s, const char* charset);
 template<class T> int atoi_n(int len, const char* s, const char** end, int base, T& result);
-extern char* uitoa_n(uint64 value, char* str, int n, int base, const char* prefix=0);
+extern char* uitoa_n(uint64_t value, char* str, int n, int base, const char* prefix=0);
 int strstr_n(const int big_len, const unsigned char* big,
 		const int little_len, const unsigned char* little);
 extern int fputs(int len, const char* s, FILE* fp);
@@ -157,6 +176,8 @@ extern std::string strtolower(const std::string& s);
 
 extern const char* fmt_bytes(const char* data, int len);
 
+// Note: returns a pointer into a shared buffer.
+extern const char* fmt(const char* format, va_list args);
 // Note: returns a pointer into a shared buffer.
 extern const char* fmt(const char* format, ...)
 	__attribute__((format (printf, 1, 2)));
@@ -178,9 +199,9 @@ extern std::string strreplace(const std::string& s, const std::string& o, const 
 extern std::string strstrip(std::string s);
 
 extern bool hmac_key_set;
-extern uint8 shared_hmac_md5_key[16];
+extern uint8_t shared_hmac_md5_key[16];
 extern bool siphash_key_set;
-extern uint8 shared_siphash_key[SIPHASH_KEYLEN];
+extern uint8_t shared_siphash_key[SIPHASH_KEYLEN];
 
 extern void hmac_md5(size_t size, const unsigned char* bytes,
 			unsigned char digest[16]);
@@ -213,7 +234,7 @@ long int bro_random();
 // in deterministic mode, else it updates the state of the deterministic PRNG.
 void bro_srandom(unsigned int seed);
 
-extern uint64 rand64bit();
+extern uint64_t rand64bit();
 
 // Each event source that may generate events gets an internally unique ID.
 // This is always LOCAL for a local Bro. For remote event sources, it gets
@@ -227,18 +248,25 @@ typedef ptr_compat_uint SourceID;
 #define PRI_SOURCE_ID PRI_PTR_COMPAT_UINT
 static const SourceID SOURCE_LOCAL = 0;
 
+// TODO: This is a temporary marker to flag events coming in via Broker.
+// Those are remote events but we don't have any further peer informationa
+// available for them (as the old communication code would have). Once we
+// remove RemoteSerializer, we can turn the SourceID into a simple boolean
+// indicating whether it's a local or remote event.
+static const SourceID SOURCE_BROKER = 0xffffffff;
+
 extern void pinpoint();
 extern int int_list_cmp(const void* v1, const void* v2);
-
-// Contains the name of the script file that gets read
-// when a package is loaded (i.e., "__load__.bro).
-extern const char* PACKAGE_LOADER;
 
 extern const std::string& bro_path();
 extern const char* bro_magic_path();
 extern const char* bro_plugin_path();
 extern const char* bro_plugin_activate();
 extern std::string bro_prefixes();
+
+extern const std::array<std::string, 2> script_extensions;
+
+bool is_package_loader(const std::string& path);
 
 extern void add_to_bro_path(const std::string& dir);
 
@@ -266,8 +294,8 @@ protected:
 class SafeDirname : public SafePathOp {
 public:
 
-	SafeDirname(const char* path, bool error_aborts = true);
-	SafeDirname(const std::string& path, bool error_aborts = true);
+	explicit SafeDirname(const char* path, bool error_aborts = true);
+	explicit SafeDirname(const std::string& path, bool error_aborts = true);
 
 private:
 
@@ -277,8 +305,8 @@ private:
 class SafeBasename : public SafePathOp {
 public:
 
-	SafeBasename(const char* path, bool error_aborts = true);
-	SafeBasename(const std::string& path, bool error_aborts = true);
+	explicit SafeBasename(const char* path, bool error_aborts = true);
+	explicit SafeBasename(const std::string& path, bool error_aborts = true);
 
 private:
 
@@ -290,7 +318,7 @@ std::string implode_string_vector(const std::vector<std::string>& v,
 
 /**
  * Flatten a script name by replacing '/' path separators with '.'.
- * @param file A path to a Bro script.  If it is a __load__.bro, that part
+ * @param file A path to a Bro script.  If it is a __load__.zeek, that part
  *             is discarded when constructing the flattened the name.
  * @param prefix A string to prepend to the flattened script name.
  * @return The flattened script name.
@@ -307,9 +335,9 @@ std::string flatten_script_name(const std::string& name,
 std::string normalize_path(const std::string& path);
 
 /**
- * Strip the BROPATH component from a path.
- * @param path A file/directory path that may be within a BROPATH component.
- * @return *path* minus the common BROPATH component (if any) removed.
+ * Strip the ZEEKPATH component from a path.
+ * @param path A file/directory path that may be within a ZEEKPATH component.
+ * @return *path* minus the common ZEEKPATH component (if any) removed.
  */
 std::string without_bropath_component(const std::string& path);
 
@@ -322,6 +350,14 @@ std::string without_bropath_component(const std::string& path);
  */
 std::string find_file(const std::string& filename, const std::string& path_set,
                       const std::string& opt_ext = "");
+
+/**
+ * Locate a script file within a given search path.
+ * @param filename Name of a file to find.
+ * @param path_set Colon-delimited set of paths to search for the file.
+ * @return Path to the found file, or an empty string if not found.
+ */
+std::string find_script_file(const std::string& filename, const std::string& path_set);
 
 // Wrapper around fopen(3).  Emits an error when failing to open.
 FILE* open_file(const std::string& path, const std::string& mode = "r");
@@ -391,13 +427,13 @@ extern int time_compare(struct timeval* tv_a, struct timeval* tv_b);
 
 // Returns an integer that's very likely to be unique, even across Bro
 // instances. The integer can be drawn from different pools, which is helpful
-// when the randon number generator is seeded to be deterministic. In that
+// when the random number generator is seeded to be deterministic. In that
 // case, the same sequence of integers is generated per pool.
 #define UID_POOL_DEFAULT_INTERNAL 1
 #define UID_POOL_DEFAULT_SCRIPT   2
 #define UID_POOL_CUSTOM_SCRIPT    10 // First available custom script level pool.
-extern uint64 calculate_unique_id();
-extern uint64 calculate_unique_id(const size_t pool);
+extern uint64_t calculate_unique_id();
+extern uint64_t calculate_unique_id(const size_t pool);
 
 // For now, don't use hash_maps - they're not fully portable.
 #if 0
@@ -495,7 +531,7 @@ inline int safe_vsnprintf(char* str, size_t size, const char* format, va_list al
 
 // Returns total memory allocations and (if available) amount actually
 // handed out by malloc.
-extern void get_memory_usage(uint64* total, uint64* malloced);
+extern void get_memory_usage(uint64_t* total, uint64_t* malloced);
 
 // Class to be used as a third argument for STL maps to be able to use
 // char*'s as keys. Otherwise the pointer values will be compared instead of
@@ -515,5 +551,34 @@ struct CompareString
  * @return The canonicalized version of \a name which caller may later delete[].
  */
 std::string canonify_name(const std::string& name);
+
+/**
+ * Reentrant version of strerror(). Takes care of the difference between the
+ * XSI-compliant and the GNU-specific version of strerror_r().
+ */
+void bro_strerror_r(int bro_errno, char* buf, size_t buflen);
+
+/**
+ * A wrapper function for getenv().  Helps check for existence of
+ * legacy environment variable names that map to the latest \a name.
+ */
+char* zeekenv(const char* name);
+
+/**
+ * Small convenience function. Does what std::make_unique does in C++14. Will not
+ * work on arrays.
+ */
+template <typename T, typename ... Args>
+std::unique_ptr<T> build_unique (Args&&... args) {
+	return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+}
+
+/**
+ * Escapes bytes in a string that are not valid UTF8 characters with \xYY format. Used
+ * by the JSON writer and BIF methods.
+ * @param val the input string to be escaped
+ * @return the escaped string
+ */
+std::string json_escape_utf8(const std::string& val);
 
 #endif

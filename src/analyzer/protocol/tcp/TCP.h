@@ -4,7 +4,6 @@
 #define ANALYZER_PROTOCOL_TCP_TCP_H
 
 #include "analyzer/Analyzer.h"
-#include "analyzer/protocol/tcp/TCP.h"
 #include "PacketDumper.h"
 #include "IPAddr.h"
 #include "TCP_Endpoint.h"
@@ -26,8 +25,8 @@ class TCP_Reassembler;
 
 class TCP_Analyzer : public analyzer::TransportLayerAnalyzer {
 public:
-	TCP_Analyzer(Connection* conn);
-	virtual ~TCP_Analyzer();
+	explicit TCP_Analyzer(Connection* conn);
+	~TCP_Analyzer() override;
 
 	void EnableReassembly();
 
@@ -35,8 +34,9 @@ public:
 	// independently of whether we do any reassembly.
 	void AddChildPacketAnalyzer(analyzer::Analyzer* a);
 
-	virtual Analyzer* FindChild(ID id);
-	virtual Analyzer* FindChild(Tag tag);
+	Analyzer* FindChild(ID id) override;
+	Analyzer* FindChild(Tag tag) override;
+	bool RemoveChildAnalyzer(ID id) override;
 
 	// True if the connection has closed in some sense, false otherwise.
 	int IsClosed() const	{ return orig->did_close || resp->did_close; }
@@ -52,8 +52,8 @@ public:
 	int RespState() const	{ return resp->state; }
 	int OrigPrevState() const	{ return orig->prev_state; }
 	int RespPrevState() const	{ return resp->prev_state; }
-	uint32 OrigSeq() const	{ return orig->LastSeq(); }
-	uint32 RespSeq() const	{ return resp->LastSeq(); }
+	uint32_t OrigSeq() const	{ return orig->LastSeq(); }
+	uint32_t RespSeq() const	{ return resp->LastSeq(); }
 
 	// True if either endpoint still has pending data.  closing_endp
 	// is an endpoint that has indicated it is closing (i.e., for
@@ -62,8 +62,8 @@ public:
 	// the test is whether it has any outstanding, un-acked data.
 	int DataPending(TCP_Endpoint* closing_endp);
 
-	virtual void SetContentsFile(unsigned int direction, BroFile* f);
-	virtual BroFile* GetContentsFile(unsigned int direction) const;
+	void SetContentsFile(unsigned int direction, BroFile* f) override;
+	BroFile* GetContentsFile(unsigned int direction) const override;
 
 	// Callback to process a TCP option.
 	typedef int (*proc_tcp_option_t)(unsigned int opt, unsigned int optlen,
@@ -71,7 +71,7 @@ public:
 			bool is_orig, void* cookie);
 
 	// From Analyzer.h
-	virtual void UpdateConnVal(RecordVal *conn_val);
+	void UpdateConnVal(RecordVal *conn_val) override;
 
 	// Needs to be static because it's passed as a pointer-to-function
 	// rather than pointer-to-member-function.
@@ -88,13 +88,13 @@ protected:
 	friend class analyzer::pia::PIA_TCP;
 
 	// Analyzer interface.
-	virtual void Init();
-	virtual void Done();
-	virtual void DeliverPacket(int len, const u_char* data, bool orig, uint64 seq, const IP_Hdr* ip, int caplen);
-	virtual void DeliverStream(int len, const u_char* data, bool orig);
-	virtual void Undelivered(uint64 seq, int len, bool orig);
-	virtual void FlipRoles();
-	virtual bool IsReuse(double t, const u_char* pkt);
+	void Init() override;
+	void Done() override;
+	void DeliverPacket(int len, const u_char* data, bool orig, uint64_t seq, const IP_Hdr* ip, int caplen) override;
+	void DeliverStream(int len, const u_char* data, bool orig) override;
+	void Undelivered(uint64_t seq, int len, bool orig) override;
+	void FlipRoles() override;
+	bool IsReuse(double t, const u_char* pkt) override;
 
 	// Returns the TCP header pointed to by data (which we assume is
 	// aligned), updating data, len & caplen.  Returns nil if the header
@@ -117,13 +117,13 @@ protected:
 	// this fact.
 	void UpdateStateMachine(double t,
 			TCP_Endpoint* endpoint, TCP_Endpoint* peer,
-			uint32 base_seq, uint32 ack_seq,
-			int len, int32 delta_last, int is_orig, TCP_Flags flags,
+			uint32_t base_seq, uint32_t ack_seq,
+			int len, int32_t delta_last, int is_orig, TCP_Flags flags,
 			int& do_close, int& gen_event);
 
 	void UpdateInactiveState(double t,
 				TCP_Endpoint* endpoint, TCP_Endpoint* peer,
-				uint32 base_seq, uint32 ack_seq,
+				uint32_t base_seq, uint32_t ack_seq,
 				int len, int is_orig, TCP_Flags flags,
 				int& do_close, int& gen_event);
 
@@ -135,18 +135,18 @@ protected:
 				    TCP_Flags flags, int& do_close, int& gen_event);
 
 	void UpdateClosedState(double t, TCP_Endpoint* endpoint,
-				int32 delta_last, TCP_Flags flags,
+				int32_t delta_last, TCP_Flags flags,
 				int& do_close);
 
 	void UpdateResetState(int len, TCP_Flags flags);
 
-	void GeneratePacketEvent(uint64 rel_seq, uint64 rel_ack,
+	void GeneratePacketEvent(uint64_t rel_seq, uint64_t rel_ack,
 				 const u_char* data, int len, int caplen,
 				 int is_orig, TCP_Flags flags);
 
 	int DeliverData(double t, const u_char* data, int len, int caplen,
 			const IP_Hdr* ip, const struct tcphdr* tp,
-			TCP_Endpoint* endpoint, uint64 rel_data_seq,
+			TCP_Endpoint* endpoint, uint64_t rel_data_seq,
 			int is_orig, TCP_Flags flags);
 
 	void CheckRecording(int need_contents, TCP_Flags flags);
@@ -174,6 +174,13 @@ protected:
 	static int TCPOptionEvent(unsigned int opt, unsigned int optlen,
 				const u_char* option, TCP_Analyzer* analyzer,
 				  bool is_orig, void* cookie);
+
+	// A couple utility functions that may also be useful to derived analyzers.
+	static uint64_t get_relative_seq(const TCP_Endpoint* endpoint,
+	                               uint32_t cur_base, uint32_t last,
+	                               uint32_t wraps, bool* underflow = 0);
+
+	static int get_segment_len(int payload_len, TCP_Flags flags);
 
 private:
 	TCP_Endpoint* orig;
@@ -205,11 +212,11 @@ public:
 	: Analyzer(name, conn)
 		{ tcp = 0; }
 
-	TCP_ApplicationAnalyzer(Connection* conn)
+	explicit TCP_ApplicationAnalyzer(Connection* conn)
 	: Analyzer(conn)
 		{ tcp = 0; }
 
-	virtual ~TCP_ApplicationAnalyzer()	{ }
+	~TCP_ApplicationAnalyzer() override { }
 
 	// This may be nil if we are not directly associated with a TCP
 	// analyzer (e.g., we're part of a tunnel decapsulation pipeline).
@@ -238,14 +245,14 @@ public:
 	// of ConnectionReset is delayed.
 	virtual void PacketWithRST();
 
-	virtual void DeliverPacket(int len, const u_char* data, bool orig,
-					uint64 seq, const IP_Hdr* ip, int caplen);
-	virtual void Init();
+	void DeliverPacket(int len, const u_char* data, bool orig,
+					uint64_t seq, const IP_Hdr* ip, int caplen) override;
+	void Init() override;
 
 	// This suppresses violations if the TCP connection wasn't
 	// fully established.
-	virtual void ProtocolViolation(const char* reason,
-					const char* data = 0, int len = 0);
+	void ProtocolViolation(const char* reason,
+					const char* data = 0, int len = 0) override;
 
 	// "name" and "val" both now belong to this object, which needs to
 	//  delete them when done with them.
@@ -260,7 +267,7 @@ public:
 	TCP_SupportAnalyzer(const char* name, Connection* conn, bool arg_orig)
 		: analyzer::SupportAnalyzer(name, conn, arg_orig)	{ }
 
-	virtual ~TCP_SupportAnalyzer() {}
+	~TCP_SupportAnalyzer() override {}
 
 	// These are passed on from TCP_Analyzer.
 	virtual void EndpointEOF(bool is_orig)	{ }
@@ -274,9 +281,9 @@ public:
 
 class TCPStats_Endpoint {
 public:
-	TCPStats_Endpoint(TCP_Endpoint* endp);
+	explicit TCPStats_Endpoint(TCP_Endpoint* endp);
 
-	int DataSent(double t, uint64 seq, int len, int caplen, const u_char* data,
+	int DataSent(double t, uint64_t seq, int len, int caplen, const u_char* data,
 			const IP_Hdr* ip, const struct tcphdr* tp);
 
 	RecordVal* BuildStats();
@@ -289,25 +296,25 @@ protected:
 	int num_in_order;
 	int num_OO;
 	int num_repl;
-	uint64 max_top_seq;
+	uint64_t max_top_seq;
 	int last_id;
 	int endian_type;
 };
 
 class TCPStats_Analyzer : public tcp::TCP_ApplicationAnalyzer {
 public:
-	TCPStats_Analyzer(Connection* c);
-	~TCPStats_Analyzer();
+	explicit TCPStats_Analyzer(Connection* c);
+	~TCPStats_Analyzer() override;
 
-	virtual void Init();
-	virtual void Done();
+	void Init() override;
+	void Done() override;
 
 	static analyzer::Analyzer* Instantiate(Connection* conn)
 		{ return new TCPStats_Analyzer(conn); }
 
 protected:
-	virtual void DeliverPacket(int len, const u_char* data, bool is_orig,
-					uint64 seq, const IP_Hdr* ip, int caplen);
+	void DeliverPacket(int len, const u_char* data, bool is_orig,
+					uint64_t seq, const IP_Hdr* ip, int caplen) override;
 
 	TCPStats_Endpoint* orig_stats;
 	TCPStats_Endpoint* resp_stats;

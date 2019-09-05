@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <ctype.h>
 
@@ -17,8 +17,8 @@ Ident_Analyzer::Ident_Analyzer(Connection* conn)
 	{
 	did_bad_reply = did_deliver = 0;
 
-	orig_ident = new tcp::ContentLine_Analyzer(conn, true);
-	resp_ident = new tcp::ContentLine_Analyzer(conn, false);
+	orig_ident = new tcp::ContentLine_Analyzer(conn, true, 1000);
+	resp_ident = new tcp::ContentLine_Analyzer(conn, false, 1000);
 
 	orig_ident->SetIsNULSensitive(true);
 	resp_ident->SetIsNULSensitive(true);
@@ -56,6 +56,9 @@ void Ident_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig)
 	if ( TCP() )
 		s = is_orig ? TCP()->Orig() : TCP()->Resp();
 
+	if ( length == 0 )
+		return;
+
 	if ( is_orig )
 		{
 		if ( ! ident_request )
@@ -80,12 +83,11 @@ void Ident_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig)
 			Weird("ident_request_addendum", s.CheckString());
 			}
 
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(new PortVal(local_port, TRANSPORT_TCP));
-		vl->append(new PortVal(remote_port, TRANSPORT_TCP));
-
-		ConnectionEvent(ident_request, vl);
+		ConnectionEventFast(ident_request, {
+			BuildConnVal(),
+			val_mgr->GetPort(local_port, TRANSPORT_TCP),
+			val_mgr->GetPort(remote_port, TRANSPORT_TCP),
+		});
 
 		did_deliver = 1;
 		}
@@ -141,13 +143,13 @@ void Ident_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig)
 
 		if ( is_error )
 			{
-			val_list* vl = new val_list;
-			vl->append(BuildConnVal());
-			vl->append(new PortVal(local_port, TRANSPORT_TCP));
-			vl->append(new PortVal(remote_port, TRANSPORT_TCP));
-			vl->append(new StringVal(end_of_line - line, line));
-
-			ConnectionEvent(ident_error, vl);
+			if ( ident_error )
+				ConnectionEventFast(ident_error, {
+					BuildConnVal(),
+					val_mgr->GetPort(local_port, TRANSPORT_TCP),
+					val_mgr->GetPort(remote_port, TRANSPORT_TCP),
+					new StringVal(end_of_line - line, line),
+				});
 			}
 
 		else
@@ -175,14 +177,13 @@ void Ident_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig)
 
 			line = skip_whitespace(colon + 1, end_of_line);
 
-			val_list* vl = new val_list;
-			vl->append(BuildConnVal());
-			vl->append(new PortVal(local_port, TRANSPORT_TCP));
-			vl->append(new PortVal(remote_port, TRANSPORT_TCP));
-			vl->append(new StringVal(end_of_line - line, line));
-			vl->append(new StringVal(sys_type_s));
-
-			ConnectionEvent(ident_reply, vl);
+			ConnectionEventFast(ident_reply, {
+				BuildConnVal(),
+				val_mgr->GetPort(local_port, TRANSPORT_TCP),
+				val_mgr->GetPort(remote_port, TRANSPORT_TCP),
+				new StringVal(end_of_line - line, line),
+				new StringVal(sys_type_s),
+			});
 			}
 		}
 	}

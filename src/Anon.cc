@@ -12,16 +12,16 @@
 
 AnonymizeIPAddr* ip_anonymizer[NUM_ADDR_ANONYMIZATION_METHODS] = {0};
 
-static uint32 rand32()
+static uint32_t rand32()
 	{
 	return ((bro_random() & 0xffff) << 16) | (bro_random() & 0xffff);
 	}
 
 // From tcpdpriv.
-int bi_ffs(uint32 value)
+int bi_ffs(uint32_t value)
 	{
 	int add = 0;
-	static uint8 bvals[] = {
+	static uint8_t bvals[] = {
 		0, 4, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1
 	};
 
@@ -82,12 +82,13 @@ int AnonymizeIPAddr::PreserveNet(ipaddr32_t input)
 
 ipaddr32_t AnonymizeIPAddr_Seq::anonymize(ipaddr32_t /* input */)
 	{
-	return htonl(seq++);
+	++seq;
+	return htonl(seq);
 	}
 
 ipaddr32_t AnonymizeIPAddr_RandomMD5::anonymize(ipaddr32_t input)
 	{
-	uint8 digest[16];
+	uint8_t digest[16];
 	ipaddr32_t output = 0;
 
 	hmac_md5(sizeof(input), (u_char*)(&input), digest);
@@ -106,7 +107,7 @@ ipaddr32_t AnonymizeIPAddr_RandomMD5::anonymize(ipaddr32_t input)
 
 ipaddr32_t AnonymizeIPAddr_PrefixMD5::anonymize(ipaddr32_t input)
 	{
-	uint8 digest[16];
+	uint8_t digest[16];
 	ipaddr32_t prefix_mask = 0xffffffff;
 	input = ntohl(input);
 	ipaddr32_t output = input;
@@ -178,8 +179,8 @@ int AnonymizeIPAddr_A50::PreservePrefix(ipaddr32_t input, int num_bits)
 	else if ( num_bits > 0 )
 		{
 		assert((0xFFFFFFFFU >> 1) == 0x7FFFFFFFU);
-		uint32 suffix_mask = (0xFFFFFFFFU >> num_bits);
-		uint32 prefix_mask = ~suffix_mask;
+		uint32_t suffix_mask = (0xFFFFFFFFU >> num_bits);
+		uint32_t prefix_mask = ~suffix_mask;
 		n->output = (input & prefix_mask) | (rand32() & suffix_mask);
 		}
 
@@ -414,10 +415,10 @@ void log_anonymization_mapping(ipaddr32_t input, ipaddr32_t output)
 	{
 	if ( anonymization_mapping )
 		{
-		val_list* vl = new val_list;
-		vl->append(new AddrVal(input));
-		vl->append(new AddrVal(output));
-		mgr.QueueEvent(anonymization_mapping, vl);
+		mgr.QueueEventFast(anonymization_mapping, {
+			new AddrVal(input),
+			new AddrVal(output)
+		});
 		}
 	}
 

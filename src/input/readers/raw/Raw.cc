@@ -31,6 +31,7 @@ Raw::Raw(ReaderFrontend *frontend) : ReaderBackend(frontend), file(nullptr, fclo
 	execute = false;
 	firstrun = true;
 	mtime = 0;
+	ino = 0;
 	forcekill = false;
 	offset = 0;
 	separator.assign( (const char*) BifConst::InputRaw::record_separator->Bytes(),
@@ -90,7 +91,7 @@ bool Raw::SetFDFlags(int fd, int cmd, int flags)
 		return true;
 
 	char buf[256];
-	strerror_r(errno, buf, sizeof(buf));
+	bro_strerror_r(errno, buf, sizeof(buf));
 	Error(Fmt("failed to set fd flags: %s", buf));
 	return false;
 	}
@@ -98,7 +99,7 @@ bool Raw::SetFDFlags(int fd, int cmd, int flags)
 
 std::unique_lock<std::mutex> Raw::AcquireForkMutex()
 	{
-	auto lock = plugin::Bro_RawReader::plugin.ForkMutex();
+	auto lock = plugin::Zeek_RawReader::plugin.ForkMutex();
 
 	try
 		{
@@ -197,7 +198,7 @@ bool Raw::Execute()
 			else
 				{
 				char buf[256];
-				strerror_r(errno, buf, sizeof(buf));
+				bro_strerror_r(errno, buf, sizeof(buf));
 				Warning(Fmt("Could not set child process group: %s", buf));
 				}
 			}
@@ -293,7 +294,7 @@ bool Raw::OpenInput()
 			if ( fseek(file.get(), pos, whence) < 0 )
 				{
 				char buf[256];
-				strerror_r(errno, buf, sizeof(buf));
+				bro_strerror_r(errno, buf, sizeof(buf));
 				Error(Fmt("Seek failed in init: %s", buf));
 				}
 			}
@@ -341,6 +342,7 @@ bool Raw::DoInit(const ReaderInfo& info, int num_fields, const Field* const* fie
 
 	fname = info.source;
 	mtime = 0;
+	ino = 0;
 	execute = false;
 	firstrun = true;
 	int want_fields = 1;
@@ -553,11 +555,12 @@ bool Raw::DoUpdate()
 				return false;
 				}
 
-			if ( sb.st_mtime <= mtime )
+			if ( sb.st_ino == ino && sb.st_mtime == mtime )
 				// no change
 				return true;
 
 			mtime = sb.st_mtime;
+			ino = sb.st_ino;
 			// file changed. reread.
 			//
 			// fallthrough
@@ -688,6 +691,7 @@ bool Raw::DoUpdate()
 			EndCurrentSend();
 
 		SendEvent("InputRaw::process_finished", 4, vals);
+		return false;
 		}
 
 

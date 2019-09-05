@@ -3,7 +3,7 @@
 #ifndef LOGGING_TAG_H
 #define LOGGING_TAG_H
 
-#include "bro-config.h"
+#include "zeek-config.h"
 #include "util.h"
 #include "../Tag.h"
 #include "plugin/TaggedComponent.h"
@@ -43,7 +43,7 @@ public:
 	 * Returns false if the tag represents an error value rather than a
 	 * legal writer type.
 	 */
-	explicit operator bool() const	{ return *this != Tag(); }
+	explicit operator bool() const	{ return *this != Error; }
 
 	/**
 	 * Assignment operator.
@@ -82,7 +82,7 @@ public:
 	 */
 	EnumVal* AsEnumVal() const;
 
-	static Tag Error;
+	static const Tag Error;
 
 protected:
 	friend class plugin::ComponentManager<Tag, Component>;
@@ -98,14 +98,14 @@ protected:
 	 * @param subtype The sub type, which is left to an writer for
 	 * interpretation. By default it's set to zero.
 	 */
-	Tag(type_t type, subtype_t subtype = 0);
+	explicit Tag(type_t type, subtype_t subtype = 0);
 
 	/**
 	 * Constructor.
 	 *
 	 * @param val An enum value of script type \c Log::Writer.
 	 */
-	Tag(EnumVal* val) : ::Tag(val) {}
+	explicit Tag(EnumVal* val) : ::Tag(val) {}
 };
 
 }

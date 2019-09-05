@@ -76,7 +76,7 @@ void SSH_Analyzer::DeliverStream(int len, const u_char* data, bool orig)
 		}
 	}
 
-void SSH_Analyzer::Undelivered(uint64 seq, int len, bool orig)
+void SSH_Analyzer::Undelivered(uint64_t seq, int len, bool orig)
 	{
 	tcp::TCP_ApplicationAnalyzer::Undelivered(seq, len, orig);
 	had_gap = true;
@@ -106,6 +106,8 @@ void SSH_Analyzer::ProcessEncrypted(int len, bool orig)
 		if ( ! userauth_failure_size && (len + 16 == service_accept_size) )
 			{
 			auth_decision_made = true;
+			if ( ssh_auth_attempted )
+				BifEvent::generate_ssh_auth_attempted(interp->bro_analyzer(), interp->bro_analyzer()->Conn(), true);
 			if ( ssh_auth_successful )
 				BifEvent::generate_ssh_auth_successful(interp->bro_analyzer(), interp->bro_analyzer()->Conn(), true);
 			return;

@@ -1,10 +1,13 @@
+
+#include <broker/broker.hh>
+#include <broker/zeek.hh>
+#include <cstdio>
+#include <cstring>
+#include <unistd.h>
+
 #include "Manager.h"
 #include "Data.h"
 #include "Store.h"
-#include <broker/broker.hh>
-#include <broker/report.hh>
-#include <cstdio>
-#include <unistd.h>
 #include "util.h"
 #include "Var.h"
 #include "Reporter.h"
@@ -15,15 +18,52 @@
 #include "logging/Manager.h"
 #include "DebugLogger.h"
 #include "iosource/Manager.h"
+#include "SerializationFormat.h"
 
 using namespace std;
 
-VectorType* bro_broker::Manager::vector_of_data_type;
-EnumType* bro_broker::Manager::log_id_type;
-EnumType* bro_broker::Manager::writer_id_type;
-int bro_broker::Manager::send_flags_self_idx;
-int bro_broker::Manager::send_flags_peers_idx;
-int bro_broker::Manager::send_flags_unsolicited_idx;
+namespace bro_broker {
+
+static inline Val* get_option(const char* option)
+	{
+	auto id = global_scope()->Lookup(option);
+
+	if ( ! (id && id->ID_Val()) )
+		reporter->FatalError("Unknown Broker option %s", option);
+
+	return id->ID_Val();
+	}
+
+class BrokerConfig : public broker::configuration {
+public:
+	BrokerConfig(broker::broker_options options)
+		: broker::configuration(options)
+		{
+		openssl_cafile = get_option("Broker::ssl_cafile")->AsString()->CheckString();
+		openssl_capath = get_option("Broker::ssl_capath")->AsString()->CheckString();
+		openssl_certificate = get_option("Broker::ssl_certificate")->AsString()->CheckString();
+		openssl_key = get_option("Broker::ssl_keyfile")->AsString()->CheckString();
+		openssl_passphrase = get_option("Broker::ssl_passphrase")->AsString()->CheckString();
+		}
+};
+
+class BrokerState {
+public:
+	BrokerState(BrokerConfig config, size_t congestion_queue_size)
+		: endpoint(std::move(config)),
+		  subscriber(endpoint.make_subscriber({}, congestion_queue_size)),
+		  status_subscriber(endpoint.make_status_subscriber(true))
+		{
+		}
+
+	broker::endpoint endpoint;
+	broker::subscriber subscriber;
+	broker::status_subscriber status_subscriber;
+};
+
+const broker::endpoint_info Manager::NoPeer{{}, {}};
+
+int Manager::script_scope = 0;
 
 struct unref_guard {
 	unref_guard(Val* v) : val(v) {}
@@ -31,209 +71,394 @@ struct unref_guard {
 	Val* val;
 };
 
-bro_broker::Manager::Manager()
-	: iosource::IOSource(), next_timestamp(-1)
+struct scoped_reporter_location {
+	scoped_reporter_location(Frame* frame)
+		{
+		reporter->PushLocation(frame->GetCall()->GetLocationInfo());
+		}
+
+	~scoped_reporter_location()
+		{
+		reporter->PopLocation();
+		}
+};
+
+#ifdef DEBUG
+static std::string RenderMessage(std::string topic, const broker::data& x)
 	{
-	SetIdle(true);
+	return fmt("%s -> %s", broker::to_string(x).c_str(), topic.c_str());
 	}
 
-bro_broker::Manager::~Manager()
+static std::string RenderEvent(std::string topic, std::string name, const broker::data& args)
 	{
-	vector<decltype(data_stores)::key_type> stores_to_close;
-
-	for ( auto& s : data_stores )
-		stores_to_close.emplace_back(s.first);
-
-	for ( auto& s : stores_to_close )
-		// This doesn't loop directly over data_stores, because CloseStore
-		// modifies the map and invalidates iterators.
-		CloseStore(s.first, s.second);
+	return fmt("%s(%s) -> %s", name.c_str(), broker::to_string(args).c_str(), topic.c_str());
 	}
 
-static int require_field(RecordType* rt, const char* name)
+static std::string RenderMessage(const broker::store::response& x)
 	{
-	auto rval = rt->FieldOffset(name);
-
-	if ( rval < 0 )
-		reporter->InternalError("no field named '%s' in record type '%s'", name,
-		                        rt->GetName().data());
-
-	return rval;
+	return fmt("%s [id %" PRIu64 "]", (x.answer ? broker::to_string(*x.answer).c_str() : "<no answer>"), x.id);
 	}
 
-static int endpoint_flags_to_int(Val* broker_endpoint_flags)
+static std::string RenderMessage(const broker::vector* xs)
 	{
-	int rval = 0;
-	auto r = broker_endpoint_flags->AsRecordVal();
-	Val* auto_publish_flag = r->Lookup("auto_publish", true);
-	Val* auto_advertise_flag = r->Lookup("auto_advertise", true);
-
-	if ( auto_publish_flag->AsBool() )
-		rval |= broker::AUTO_PUBLISH;
-
-	if ( auto_advertise_flag->AsBool() )
-		rval |= broker::AUTO_ADVERTISE;
-
-	Unref(auto_publish_flag);
-	Unref(auto_advertise_flag);
-	return rval;
+	return broker::to_string(*xs);
 	}
 
-bool bro_broker::Manager::Enable(Val* broker_endpoint_flags)
+static std::string RenderMessage(const broker::data& d)
 	{
-	if ( endpoint != nullptr )
-		return true;
+	return broker::to_string(d);
+	}
 
-	auto send_flags_type = internal_type("Broker::SendFlags")->AsRecordType();
-	send_flags_self_idx = require_field(send_flags_type, "self");
-	send_flags_peers_idx = require_field(send_flags_type, "peers");
-	send_flags_unsolicited_idx = require_field(send_flags_type, "unsolicited");
+static std::string RenderMessage(const broker::vector& xs)
+	{
+	return broker::to_string(xs);
+	}
 
+static std::string RenderMessage(const broker::status& s)
+	{
+	return broker::to_string(s.code());
+	}
+
+static std::string RenderMessage(const broker::error& e)
+	{
+	return fmt("%s (%s)", broker::to_string(e.code()).c_str(),
+		   caf::to_string(e.context()).c_str());
+	}
+
+#endif
+
+Manager::Manager(bool arg_reading_pcaps)
+	{
+	bound_port = 0;
+	reading_pcaps = arg_reading_pcaps;
+	after_zeek_init = false;
+	peer_count = 0;
+	times_processed_without_idle = 0;
+	log_batch_size = 0;
+	log_batch_interval = 0;
+	log_topic_func = nullptr;
+	vector_of_data_type = nullptr;
+	log_id_type = nullptr;
+	writer_id_type = nullptr;
+
+	SetIdle(false);
+	}
+
+Manager::~Manager()
+	{
+	}
+
+void Manager::InitPostScript()
+	{
+	DBG_LOG(DBG_BROKER, "Initializing");
+
+	log_batch_size = get_option("Broker::log_batch_size")->AsCount();
+	log_batch_interval = get_option("Broker::log_batch_interval")->AsInterval();
+	default_log_topic_prefix =
+	    get_option("Broker::default_log_topic_prefix")->AsString()->CheckString();
+	log_topic_func = get_option("Broker::log_topic")->AsFunc();
 	log_id_type = internal_type("Log::ID")->AsEnumType();
 	writer_id_type = internal_type("Log::Writer")->AsEnumType();
 
-	bro_broker::opaque_of_data_type = new OpaqueType("Broker::Data");
-	bro_broker::opaque_of_set_iterator = new OpaqueType("Broker::SetIterator");
-	bro_broker::opaque_of_table_iterator = new OpaqueType("Broker::TableIterator");
-	bro_broker::opaque_of_vector_iterator = new OpaqueType("Broker::VectorIterator");
-	bro_broker::opaque_of_record_iterator = new OpaqueType("Broker::RecordIterator");
-	bro_broker::opaque_of_store_handle = new OpaqueType("Broker::Handle");
+	opaque_of_data_type = new OpaqueType("Broker::Data");
+	opaque_of_set_iterator = new OpaqueType("Broker::SetIterator");
+	opaque_of_table_iterator = new OpaqueType("Broker::TableIterator");
+	opaque_of_vector_iterator = new OpaqueType("Broker::VectorIterator");
+	opaque_of_record_iterator = new OpaqueType("Broker::RecordIterator");
+	opaque_of_store_handle = new OpaqueType("Broker::Store");
 	vector_of_data_type = new VectorType(internal_type("Broker::Data")->Ref());
 
-	auto res = broker::init();
-
-	if ( res )
-		{
-		fprintf(stderr, "broker::init failed: %s\n", broker::strerror(res));
-		return false;
-		}
-
-	res = broker::report::init(true);
-
-	if ( res )
-		{
-		fprintf(stderr, "broker::report::init failed: %s\n",
-		        broker::strerror(res));
-		return false;
-		}
-
-	const char* name;
-	auto name_from_script = internal_val("Broker::endpoint_name")->AsString();
-
-	if ( name_from_script->Len() )
-		name = name_from_script->CheckString();
-	else
-		{
-		char host[256];
-
-		if ( gethostname(host, sizeof(host)) == 0 )
-			name = fmt("bro@%s.%ld", host, static_cast<long>(getpid()));
-		else
-			name = fmt("bro@<unknown>.%ld", static_cast<long>(getpid()));
-		}
-
-	int flags = endpoint_flags_to_int(broker_endpoint_flags);
-	endpoint = unique_ptr<broker::endpoint>(new broker::endpoint(name, flags));
+	// Register as a "dont-count" source first, we may change that later.
 	iosource_mgr->Register(this, true);
-	return true;
+
+	broker::broker_options options;
+	options.disable_ssl = get_option("Broker::disable_ssl")->AsBool();
+	options.forward = get_option("Broker::forward_messages")->AsBool();
+	options.use_real_time = ! reading_pcaps;
+
+	BrokerConfig config{std::move(options)};
+
+	auto scheduler_policy = get_option("Broker::scheduler_policy")->AsString()->CheckString();
+
+	if ( streq(scheduler_policy, "sharing") )
+		config.set("scheduler.policy", caf::atom("sharing"));
+	else if ( streq(scheduler_policy, "stealing") )
+		config.set("scheduler.policy", caf::atom("stealing"));
+	else
+		reporter->FatalError("Invalid Broker::scheduler_policy: %s", scheduler_policy);
+
+	auto max_threads_env = zeekenv("ZEEK_BROKER_MAX_THREADS");
+
+	if ( max_threads_env )
+		config.set("scheduler.max-threads", atoi(max_threads_env));
+	else
+		config.set("scheduler.max-threads",
+		           get_option("Broker::max_threads")->AsCount());
+
+	config.set("work-stealing.moderate-sleep-duration", caf::timespan(
+	    static_cast<unsigned>(get_option("Broker::moderate_sleep")->AsInterval() * 1e9)));
+
+	config.set("work-stealing.relaxed-sleep-duration", caf::timespan(
+	    static_cast<unsigned>(get_option("Broker::relaxed_sleep")->AsInterval() * 1e9)));
+
+	config.set("work-stealing.aggressive-poll-attempts",
+	           get_option("Broker::aggressive_polls")->AsCount());
+	config.set("work-stealing.moderate-poll-attempts",
+	           get_option("Broker::moderate_polls")->AsCount());
+
+	config.set("work-stealing.aggressive-steal-interval",
+	           get_option("Broker::aggressive_interval")->AsCount());
+	config.set("work-stealing.moderate-steal-interval",
+	           get_option("Broker::moderate_interval")->AsCount());
+	config.set("work-stealing.relaxed-steal-interval",
+	           get_option("Broker::relaxed_interval")->AsCount());
+
+	auto cqs = get_option("Broker::congestion_queue_size")->AsCount();
+	bstate = std::make_shared<BrokerState>(std::move(config), cqs);
 	}
 
-bool bro_broker::Manager::SetEndpointFlags(Val* broker_endpoint_flags)
+void Manager::Terminate()
 	{
-	if ( ! Enabled() )
-		return false;
+	FlushLogBuffers();
 
-	int flags = endpoint_flags_to_int(broker_endpoint_flags);
-	endpoint->set_flags(flags);
-	return true;
+	vector<string> stores_to_close;
+
+	for ( auto& x : data_stores )
+		stores_to_close.push_back(x.first);
+
+	for ( auto& x: stores_to_close )
+		// This doesn't loop directly over data_stores, because CloseStore
+		// modifies the map and invalidates iterators.
+		CloseStore(x);
+
+	FlushLogBuffers();
+
+	for ( auto& p : bstate->endpoint.peers() )
+		if ( p.peer.network )
+			bstate->endpoint.unpeer(p.peer.network->address,
+			                        p.peer.network->port);
+
+	bstate->endpoint.shutdown();
 	}
 
-bool bro_broker::Manager::Listen(uint16_t port, const char* addr, bool reuse_addr)
+bool Manager::Active()
 	{
-	if ( ! Enabled() )
+	if ( bstate->endpoint.is_shutdown() )
 		return false;
 
-	auto rval = endpoint->listen(port, addr, reuse_addr);
+	if ( bound_port > 0 )
+		return true;
 
-	if ( ! rval )
+	return peer_count > 0;
+	}
+
+void Manager::AdvanceTime(double seconds_since_unix_epoch)
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return;
+
+	if ( bstate->endpoint.use_real_time() )
+		return;
+
+	auto secs = std::chrono::duration<double>(seconds_since_unix_epoch);
+	auto span = std::chrono::duration_cast<broker::timespan>(secs);
+	broker::timestamp next_time{span};
+	bstate->endpoint.advance_time(next_time);
+	}
+
+void Manager::FlushPendingQueries()
+	{
+	while ( ! pending_queries.empty() )
 		{
-		reporter->Error("Failed to listen on %s:%" PRIu16 " : %s",
-		                addr ? addr : "INADDR_ANY", port,
-		                endpoint->last_error().data());
+		// possibly an infinite loop if a query can recursively
+		// generate more queries...
+		for ( auto& s : data_stores )
+			{
+			while ( ! s.second->proxy.mailbox().empty() )
+				{
+				auto response = s.second->proxy.receive();
+				ProcessStoreResponse(s.second, move(response));
+				}
+			}
 		}
 
-	return rval;
+	SetIdle(false);
 	}
 
-bool bro_broker::Manager::Connect(string addr, uint16_t port,
-                            chrono::duration<double> retry_interval)
+uint16_t Manager::Listen(const string& addr, uint16_t port)
 	{
-	if ( ! Enabled() )
-		return false;
+	if ( bstate->endpoint.is_shutdown() )
+		return 0;
 
-	auto& peer = peers[make_pair(addr, port)];
+	bound_port = bstate->endpoint.listen(addr, port);
 
-	if ( peer )
-		return false;
+	if ( bound_port == 0 )
+		Error("Failed to listen on %s:%" PRIu16,
+		      addr.empty() ? "INADDR_ANY" : addr.c_str(), port);
 
-	peer = endpoint->peer(move(addr), port, retry_interval);
+	// Register as a "does-count" source now.
+	iosource_mgr->Register(this, false);
+
+	DBG_LOG(DBG_BROKER, "Listening on %s:%" PRIu16,
+		addr.empty() ? "INADDR_ANY" : addr.c_str(), port);
+
+	return bound_port;
+	}
+
+void Manager::Peer(const string& addr, uint16_t port, double retry)
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return;
+
+	DBG_LOG(DBG_BROKER, "Starting to peer with %s:%" PRIu16,
+		addr.c_str(), port);
+
+	auto e = zeekenv("ZEEK_DEFAULT_CONNECT_RETRY");
+
+	if ( e )
+		retry = atoi(e);
+
+	if ( retry > 0.0 && retry < 1.0 )
+		// Ensure that it doesn't get turned into zero.
+		retry = 1.0;
+
+	auto secs = broker::timeout::seconds(static_cast<uint64_t>(retry));
+	bstate->endpoint.peer_nosync(addr, port, secs);
+
+	auto counts_as_iosource = get_option("Broker::peer_counts_as_iosource")->AsBool();
+
+	if ( counts_as_iosource )
+		// Register as a "does-count" source now.
+		iosource_mgr->Register(this, false);
+	}
+
+void Manager::Unpeer(const string& addr, uint16_t port)
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return;
+
+	DBG_LOG(DBG_BROKER, "Stopping to peer with %s:%" PRIu16,
+		addr.c_str(), port);
+
+	FlushLogBuffers();
+	bstate->endpoint.unpeer_nosync(addr, port);
+	}
+
+std::vector<broker::peer_info> Manager::Peers() const
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return {};
+
+	return bstate->endpoint.peers();
+	}
+
+std::string Manager::NodeID() const
+	{
+	return to_string(bstate->endpoint.node_id());
+	}
+
+bool Manager::PublishEvent(string topic, std::string name, broker::vector args)
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return true;
+
+	if ( peer_count == 0 )
+		return true;
+
+	DBG_LOG(DBG_BROKER, "Publishing event: %s",
+		RenderEvent(topic, name, args).c_str());
+	broker::zeek::Event ev(std::move(name), std::move(args));
+	bstate->endpoint.publish(move(topic), ev.move_data());
+	++statistics.num_events_outgoing;
 	return true;
 	}
 
-bool bro_broker::Manager::Disconnect(const string& addr, uint16_t port)
+bool Manager::PublishEvent(string topic, RecordVal* args)
 	{
-	if ( ! Enabled() )
+	if ( bstate->endpoint.is_shutdown() )
+		return true;
+
+	if ( peer_count == 0 )
+		return true;
+
+	if ( ! args->Lookup(0) )
 		return false;
 
-	auto it = peers.find(make_pair(addr, port));
+	auto event_name = args->Lookup(0)->AsString()->CheckString();
+	auto vv = args->Lookup(1)->AsVectorVal();
+	broker::vector xs;
+	xs.reserve(vv->Size());
 
-	if ( it == peers.end() )
-		return false;
+	for ( auto i = 0u; i < vv->Size(); ++i )
+		{
+		auto val = vv->Lookup(i)->AsRecordVal()->Lookup(0);
+		auto data_val = static_cast<DataVal*>(val);
+		xs.emplace_back(data_val->data);
+		}
 
-	auto rval = endpoint->unpeer(it->second);
-	peers.erase(it);
-	return rval;
+	return PublishEvent(topic, event_name, std::move(xs));
 	}
 
-bool bro_broker::Manager::Print(string topic, string msg, Val* flags)
+bool Manager::PublishIdentifier(std::string topic, std::string id)
 	{
-	if ( ! Enabled() )
+	if ( bstate->endpoint.is_shutdown() )
+		return true;
+
+	if ( peer_count == 0 )
+		return true;
+
+	ID* i = global_scope()->Lookup(id);
+
+	if ( ! i )
 		return false;
 
-	endpoint->send(move(topic), broker::message{move(msg)},
-	               send_flags_to_int(flags));
+	auto val = i->ID_Val();
+
+	if ( ! val )
+		// Probably could have a special case to also unset the value on the
+		// receiving side, but not sure what use that would be.
+		return false;
+
+	auto data = val_to_data(val);
+
+	if ( ! data )
+		{
+		Error("Failed to publish ID with unsupported type: %s (%s)",
+		      id.c_str(), type_name(val->Type()->Tag()));
+		return false;
+		}
+
+	broker::zeek::IdentifierUpdate msg(move(id), move(*data));
+	DBG_LOG(DBG_BROKER, "Publishing id-update: %s",
+	        RenderMessage(topic, msg.as_data()).c_str());
+	bstate->endpoint.publish(move(topic), msg.move_data());
+	++statistics.num_ids_outgoing;
 	return true;
 	}
 
-bool bro_broker::Manager::Event(std::string topic, broker::message msg, int flags)
+bool Manager::PublishLogCreate(EnumVal* stream, EnumVal* writer,
+			       const logging::WriterBackend::WriterInfo& info,
+			       int num_fields, const threading::Field* const * fields,
+			       const broker::endpoint_info& peer)
 	{
-	if ( ! Enabled() )
-		return false;
+	if ( bstate->endpoint.is_shutdown() )
+		return true;
 
-	endpoint->send(move(topic), move(msg), flags);
-	return true;
-	}
+	if ( peer_count == 0 )
+		return true;
 
-bool bro_broker::Manager::CreateLog(EnumVal* stream, EnumVal* writer,
-				    const logging::WriterBackend::WriterInfo& info,
-				    int num_fields, const threading::Field* const * fields,
-				    int flags, const string& peer)
-	{
-	if ( ! Enabled() )
-		return false;
+	auto stream_id = stream->Type()->AsEnumType()->Lookup(stream->AsEnum());
 
-	auto stream_name = stream->Type()->AsEnumType()->Lookup(stream->AsEnum());
-
-	if ( ! stream_name )
+	if ( ! stream_id )
 		{
 		reporter->Error("Failed to remotely log: stream %d doesn't have name",
 		                stream->AsEnum());
 		return false;
 		}
 
-	auto writer_name = writer->Type()->AsEnumType()->Lookup(writer->AsEnum());
+	auto writer_id = writer->Type()->AsEnumType()->Lookup(writer->AsEnum());
 
-	if ( ! writer_name )
+	if ( ! writer_id )
 		{
 		reporter->Error("Failed to remotely log: writer %d doesn't have name",
 		                writer->AsEnum());
@@ -243,6 +468,7 @@ bool bro_broker::Manager::CreateLog(EnumVal* stream, EnumVal* writer,
 	auto writer_info = info.ToBroker();
 
 	broker::vector fields_data;
+	fields_data.reserve(num_fields);
 
 	for ( auto i = 0; i < num_fields; ++i )
 		{
@@ -250,99 +476,201 @@ bool bro_broker::Manager::CreateLog(EnumVal* stream, EnumVal* writer,
 		fields_data.push_back(move(field_data));
 		}
 
-	// TODO: If peer is given, send message to just that one destination.
+	std::string topic = default_log_topic_prefix + stream_id;
+	auto bstream_id = broker::enum_value(move(stream_id));
+	auto bwriter_id = broker::enum_value(move(writer_id));
+	broker::zeek::LogCreate msg(move(bstream_id), move(bwriter_id), move(writer_info), move(fields_data));
 
-	std::string topic = std::string("bro/log/") + stream_name;
-	auto bstream_name = broker::enum_value(move(stream_name));
-	auto bwriter_name = broker::enum_value(move(writer_name));
-	broker::message msg{move("create"), move(bstream_name), move(bwriter_name), move(writer_info), move(fields_data)};
-	endpoint->send(move(topic), move(msg), flags);
+	DBG_LOG(DBG_BROKER, "Publishing log creation: %s", RenderMessage(topic, msg.as_data()).c_str());
+
+	if ( peer.node != NoPeer.node )
+		// Direct message.
+		bstate->endpoint.publish(peer, move(topic), msg.move_data());
+	else
+		// Broadcast.
+		bstate->endpoint.publish(move(topic), msg.move_data());
 
 	return true;
 	}
 
-bool bro_broker::Manager::Log(EnumVal* stream, EnumVal* writer, string path, int num_vals, const threading::Value* const * vals, int flags)
+bool Manager::PublishLogWrite(EnumVal* stream, EnumVal* writer, string path, int num_fields, const threading::Value* const * vals)
 	{
-	if ( ! Enabled() )
-		return false;
+	if ( bstate->endpoint.is_shutdown() )
+		return true;
 
-	auto stream_name = stream->Type()->AsEnumType()->Lookup(stream->AsEnum());
+	if ( peer_count == 0 )
+		return true;
 
-	if ( ! stream_name )
+	auto stream_id_num = stream->AsEnum();
+	auto stream_id = stream->Type()->AsEnumType()->Lookup(stream_id_num);
+
+	if ( ! stream_id )
 		{
 		reporter->Error("Failed to remotely log: stream %d doesn't have name",
 		                stream->AsEnum());
 		return false;
 		}
 
-	auto writer_name = writer->Type()->AsEnumType()->Lookup(writer->AsEnum());
+	auto writer_id = writer->Type()->AsEnumType()->Lookup(writer->AsEnum());
 
-	if ( ! writer_name )
+	if ( ! writer_id )
 		{
 		reporter->Error("Failed to remotely log: writer %d doesn't have name",
 		                writer->AsEnum());
 		return false;
 		}
 
-	broker::vector vals_data;
+	BinarySerializationFormat fmt;
+	char* data;
+	int len;
 
-	for ( auto i = 0; i < num_vals; ++i )
+	fmt.StartWrite();
+
+	bool success = fmt.Write(num_fields, "num_fields");
+
+	if ( ! success )
 		{
-		auto field_data = threading_val_to_data(vals[i]);
+		reporter->Error("Failed to remotely log stream %s: num_fields serialization failed", stream_id);
+		return false;
+		}
 
-		if ( ! field_data )
+	for ( int i = 0; i < num_fields; ++i )
+		{
+		if ( ! vals[i]->Write(&fmt) )
 			{
-			reporter->Error("Failed to remotely log stream %s: "
-			                "unsupported type for field #%d",
-			                stream_name, i);
+			reporter->Error("Failed to remotely log stream %s: field %d serialization failed", stream_id, i);
 			return false;
 			}
-
-		vals_data.push_back(move(*field_data));
 		}
 
-	std::string topic = std::string("bro/log/") + stream_name;
-	auto bstream_name = broker::enum_value(move(stream_name));
-	auto bwriter_name = broker::enum_value(move(writer_name));
-	broker::message msg{move("write"), move(bstream_name), move(bwriter_name), move(path), move(vals_data)};
-	endpoint->send(move(topic), move(msg), flags);
+	len = fmt.EndWrite(&data);
+	std::string serial_data(data, len);
+	free(data);
 
-	return true;
-	}
+	val_list vl{
+		stream->Ref(),
+		new StringVal(path),
+	};
 
-bool bro_broker::Manager::Event(std::string topic, RecordVal* args, Val* flags)
-	{
-	if ( ! Enabled() )
-		return false;
+	Val* v = log_topic_func->Call(&vl);
 
-	if ( ! args->Lookup(0) )
-		return false;
-
-	auto event_name = args->Lookup(0)->AsString()->CheckString();
-	auto vv = args->Lookup(1)->AsVectorVal();
-	broker::message msg;
-	msg.reserve(vv->Size() + 1);
-	msg.emplace_back(event_name);
-
-	for ( auto i = 0u; i < vv->Size(); ++i )
+	if ( ! v )
 		{
-		auto val = vv->Lookup(i)->AsRecordVal()->Lookup(0);
-		auto data_val = static_cast<DataVal*>(val);
-		msg.emplace_back(data_val->data);
+		reporter->Error("Failed to remotely log: log_topic func did not return"
+		                " a value for stream %s at path %s", stream_id,
+		                path.data());
+		return false;
 		}
 
-	endpoint->send(move(topic), move(msg), send_flags_to_int(flags));
+	std::string topic = v->AsString()->CheckString();
+	Unref(v);
+
+	auto bstream_id = broker::enum_value(move(stream_id));
+	auto bwriter_id = broker::enum_value(move(writer_id));
+	broker::zeek::LogWrite msg(move(bstream_id), move(bwriter_id), move(path),
+	                          move(serial_data));
+
+	DBG_LOG(DBG_BROKER, "Buffering log record: %s", RenderMessage(topic, msg.as_data()).c_str());
+
+	if ( log_buffers.size() <= (unsigned int)stream_id_num )
+		log_buffers.resize(stream_id_num + 1);
+
+	auto& lb = log_buffers[stream_id_num];
+	++lb.message_count;
+	auto& pending_batch = lb.msgs[topic];
+	pending_batch.emplace_back(msg.move_data());
+
+	if ( lb.message_count >= log_batch_size ||
+	     (network_time - lb.last_flush >= log_batch_interval ) )
+		statistics.num_logs_outgoing += lb.Flush(bstate->endpoint, log_batch_size);
+
 	return true;
 	}
 
-bool bro_broker::Manager::AutoEvent(string topic, Val* event, Val* flags)
+size_t Manager::LogBuffer::Flush(broker::endpoint& endpoint, size_t log_batch_size)
 	{
-	if ( ! Enabled() )
-		return false;
+	if ( endpoint.is_shutdown() )
+		return 0;
 
+	if ( ! message_count )
+		// No logs buffered for this stream.
+		return 0;
+
+	for ( auto& kv : msgs )
+		{
+		auto& topic = kv.first;
+		auto& pending_batch = kv.second;
+		broker::vector batch;
+		batch.reserve(log_batch_size + 1);
+		pending_batch.swap(batch);
+		broker::zeek::Batch msg(std::move(batch));
+		endpoint.publish(topic, msg.move_data());
+		}
+
+	auto rval = message_count;
+	last_flush = network_time;
+	message_count = 0;
+	return rval;
+	}
+
+size_t Manager::FlushLogBuffers()
+	{
+	DBG_LOG(DBG_BROKER, "Flushing all log buffers");
+	auto rval = 0u;
+
+	for ( auto& lb : log_buffers )
+		rval += lb.Flush(bstate->endpoint, log_batch_interval);
+
+	return rval;
+	}
+
+void Manager::Error(const char* format, ...)
+	{
+	va_list args;
+	va_start(args, format);
+	auto msg = fmt(format, args);
+	va_end(args);
+
+	if ( script_scope )
+		builtin_error(msg);
+	else
+		reporter->Error("%s", msg);
+	}
+
+bool Manager::AutoPublishEvent(string topic, Val* event)
+	{
 	if ( event->Type()->Tag() != TYPE_FUNC )
 		{
-		reporter->Error("Broker::auto_event must operate on an event");
+		Error("Broker::auto_publish must operate on an event");
+		return false;
+		}
+
+	auto event_val = event->AsFunc();
+	if ( event_val->Flavor() != FUNC_FLAVOR_EVENT )
+		{
+		Error("Broker::auto_publish must operate on an event");
+		return false;
+		}
+
+	auto handler = event_registry->Lookup(event_val->Name());
+	if ( ! handler )
+		{
+		Error("Broker::auto_publish failed to lookup event '%s'",
+		      event_val->Name());
+		return false;
+		}
+
+	DBG_LOG(DBG_BROKER, "Enabling auto-publising of event %s to topic %s", handler->Name(), topic.c_str());
+	handler->AutoPublish(move(topic));
+
+	return true;
+	}
+
+bool Manager::AutoUnpublishEvent(const string& topic, Val* event)
+	{
+	if ( event->Type()->Tag() != TYPE_FUNC )
+		{
+		Error("Broker::auto_event_stop must operate on an event");
 		return false;
 		}
 
@@ -350,7 +678,7 @@ bool bro_broker::Manager::AutoEvent(string topic, Val* event, Val* flags)
 
 	if ( event_val->Flavor() != FUNC_FLAVOR_EVENT )
 		{
-		reporter->Error("Broker::auto_event must operate on an event");
+		Error("Broker::auto_event_stop must operate on an event");
 		return false;
 		}
 
@@ -358,57 +686,25 @@ bool bro_broker::Manager::AutoEvent(string topic, Val* event, Val* flags)
 
 	if ( ! handler )
 		{
-		reporter->Error("Broker::auto_event failed to lookup event '%s'",
-		                event_val->Name());
+		Error("Broker::auto_event_stop failed to lookup event '%s'",
+		      event_val->Name());
 		return false;
 		}
 
-	handler->AutoRemote(move(topic), send_flags_to_int(flags));
+
+	DBG_LOG(DBG_BROKER, "Disabling auto-publishing of event %s to topic %s", handler->Name(), topic.c_str());
+	handler->AutoUnpublish(topic);
+
 	return true;
 	}
 
-bool bro_broker::Manager::AutoEventStop(const string& topic, Val* event)
+RecordVal* Manager::MakeEvent(val_list* args, Frame* frame)
 	{
-	if ( ! Enabled() )
-		return false;
-
-	if ( event->Type()->Tag() != TYPE_FUNC )
-		{
-		reporter->Error("Broker::auto_event_stop must operate on an event");
-		return false;
-		}
-
-	auto event_val = event->AsFunc();
-
-	if ( event_val->Flavor() != FUNC_FLAVOR_EVENT )
-		{
-		reporter->Error("Broker::auto_event_stop must operate on an event");
-		return false;
-		}
-
-	auto handler = event_registry->Lookup(event_val->Name());
-
-	if ( ! handler )
-		{
-		reporter->Error("Broker::auto_event_stop failed to lookup event '%s'",
-		                event_val->Name());
-		return false;
-		}
-
-
-	handler->AutoRemoteStop(topic);
-	return true;
-	}
-
-RecordVal* bro_broker::Manager::MakeEventArgs(val_list* args)
-	{
-	if ( ! Enabled() )
-		return nullptr;
-
-	auto rval = new RecordVal(BifType::Record::Broker::EventArgs);
+	auto rval = new RecordVal(BifType::Record::Broker::Event);
 	auto arg_vec = new VectorVal(vector_of_data_type);
 	rval->Assign(1, arg_vec);
 	Func* func = 0;
+	scoped_reporter_location srl{frame};
 
 	for ( auto i = 0; i < args->length(); ++i )
 		{
@@ -420,7 +716,7 @@ RecordVal* bro_broker::Manager::MakeEventArgs(val_list* args)
 
 			if ( arg_val->Type()->Tag() != TYPE_FUNC )
 				{
-				reporter->Error("1st param of Broker::event_args must be event");
+				Error("attempt to convert non-event into an event type");
 				return rval;
 				}
 
@@ -428,7 +724,7 @@ RecordVal* bro_broker::Manager::MakeEventArgs(val_list* args)
 
 			if ( func->Flavor() != FUNC_FLAVOR_EVENT )
 				{
-				reporter->Error("1st param of Broker::event_args must be event");
+				Error("attempt to convert non-event into an event type");
 				return rval;
 				}
 
@@ -436,8 +732,8 @@ RecordVal* bro_broker::Manager::MakeEventArgs(val_list* args)
 
 			if ( num_args != args->length() - 1 )
 				{
-				reporter->Error("bad # of Broker::event_args: got %d, expect %d",
-				                args->length(), num_args + 1);
+				Error("bad # of arguments: got %d, expect %d",
+				      args->length(), num_args + 1);
 				return rval;
 				}
 
@@ -445,22 +741,34 @@ RecordVal* bro_broker::Manager::MakeEventArgs(val_list* args)
 			continue;
 			}
 
+		auto got_type = (*args)[i]->Type();
 		auto expected_type = (*func->FType()->ArgTypes()->Types())[i - 1];
 
-		if ( ! same_type((*args)[i]->Type(), expected_type) )
+		if ( ! same_type(got_type, expected_type) )
 			{
 			rval->Assign(0, 0);
-			reporter->Error("Broker::event_args param %d type mismatch", i);
+			Error("event parameter #%d type mismatch, got %s, expect %s", i,
+			      type_name(got_type->Tag()),
+			      type_name(expected_type->Tag()));
 			return rval;
 			}
 
-		auto data_val = make_data_val((*args)[i]);
+		RecordVal* data_val;
+
+		if ( same_type(got_type, bro_broker::DataVal::ScriptDataType()) )
+			{
+			data_val = (*args)[i]->AsRecordVal();
+			Ref(data_val);
+			}
+		else
+			data_val = make_data_val((*args)[i]);
 
 		if ( ! data_val->Lookup(0) )
 			{
 			Unref(data_val);
 			rval->Assign(0, 0);
-			reporter->Error("Broker::event_args unsupported event/params");
+			Error("failed to convert param #%d of type %s to broker data",
+				  i, type_name(got_type->Tag()));
 			return rval;
 			}
 
@@ -470,547 +778,308 @@ RecordVal* bro_broker::Manager::MakeEventArgs(val_list* args)
 	return rval;
 	}
 
-bool bro_broker::Manager::SubscribeToPrints(string topic_prefix)
+bool Manager::Subscribe(const string& topic_prefix)
 	{
-	if ( ! Enabled() )
-		return false;
+	DBG_LOG(DBG_BROKER, "Subscribing to topic prefix %s", topic_prefix.c_str());
+	bstate->subscriber.add_topic(topic_prefix, ! after_zeek_init);
 
-	auto& q = print_subscriptions[topic_prefix].q;
+	// For backward compatibility, we also may receive messages on
+	// "bro/" topic prefixes in addition to "zeek/".
+	if ( strncmp(topic_prefix.data(), "zeek/", 5) == 0 )
+		{
+		std::string alt_topic = "bro/" + topic_prefix.substr(5);
+		bstate->subscriber.add_topic(std::move(alt_topic), ! after_zeek_init);
+		}
 
-	if ( q )
-		return false;
-
-	q = broker::message_queue(move(topic_prefix), *endpoint);
 	return true;
 	}
 
-bool bro_broker::Manager::UnsubscribeToPrints(const string& topic_prefix)
+bool Manager::Forward(string topic_prefix)
 	{
-	if ( ! Enabled() )
-		return false;
+	for ( auto i = 0u; i < forwarded_prefixes.size(); ++i )
+		if ( forwarded_prefixes[i] == topic_prefix )
+			return false;
 
-	return print_subscriptions.erase(topic_prefix);
-	}
-
-bool bro_broker::Manager::SubscribeToEvents(string topic_prefix)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	auto& q = event_subscriptions[topic_prefix].q;
-
-	if ( q )
-		return false;
-
-	q = broker::message_queue(move(topic_prefix), *endpoint);
+	DBG_LOG(DBG_BROKER, "Forwarding topic prefix %s", topic_prefix.c_str());
+	Subscribe(topic_prefix);
+	forwarded_prefixes.emplace_back(std::move(topic_prefix));
 	return true;
 	}
 
-bool bro_broker::Manager::UnsubscribeToEvents(const string& topic_prefix)
+bool Manager::Unsubscribe(const string& topic_prefix)
 	{
-	if ( ! Enabled() )
-		return false;
+	for ( auto i = 0u; i < forwarded_prefixes.size(); ++i )
+		if ( forwarded_prefixes[i] == topic_prefix )
+			{
+			DBG_LOG(DBG_BROKER, "Unforwading topic prefix %s", topic_prefix.c_str());
+			forwarded_prefixes.erase(forwarded_prefixes.begin() + i);
+			break;
+			}
 
-	return event_subscriptions.erase(topic_prefix);
-	}
-
-bool bro_broker::Manager::SubscribeToLogs(string topic_prefix)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	auto& q = log_subscriptions[topic_prefix].q;
-
-	if ( q )
-		return false;
-
-	q = broker::message_queue(move(topic_prefix), *endpoint);
+	DBG_LOG(DBG_BROKER, "Unsubscribing from topic prefix %s", topic_prefix.c_str());
+	bstate->subscriber.remove_topic(topic_prefix, ! after_zeek_init);
 	return true;
 	}
 
-bool bro_broker::Manager::UnsubscribeToLogs(const string& topic_prefix)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	return log_subscriptions.erase(topic_prefix);
-	}
-
-bool bro_broker::Manager::PublishTopic(broker::topic t)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	endpoint->publish(move(t));
-	return true;
-	}
-
-bool bro_broker::Manager::UnpublishTopic(broker::topic t)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	endpoint->unpublish(move(t));
-	return true;
-	}
-
-bool bro_broker::Manager::AdvertiseTopic(broker::topic t)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	endpoint->advertise(move(t));
-	return true;
-	}
-
-bool bro_broker::Manager::UnadvertiseTopic(broker::topic t)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	endpoint->unadvertise(move(t));
-	return true;
-	}
-
-int bro_broker::Manager::send_flags_to_int(Val* flags)
-	{
-	auto r = flags->AsRecordVal();
-	int rval = 0;
-	Val* self_flag = r->LookupWithDefault(send_flags_self_idx);
-	Val* peers_flag = r->LookupWithDefault(send_flags_peers_idx);
-	Val* unsolicited_flag = r->LookupWithDefault(send_flags_unsolicited_idx);
-
-	if ( self_flag->AsBool() )
-		rval |= broker::SELF;
-
-	if ( peers_flag->AsBool() )
-		rval |= broker::PEERS;
-
-	if ( unsolicited_flag->AsBool() )
-		rval |= broker::UNSOLICITED;
-
-	Unref(self_flag);
-	Unref(peers_flag);
-	Unref(unsolicited_flag);
-	return rval;
-	}
-
-void bro_broker::Manager::GetFds(iosource::FD_Set* read, iosource::FD_Set* write,
+void Manager::GetFds(iosource::FD_Set* read, iosource::FD_Set* write,
                            iosource::FD_Set* except)
 	{
-	read->Insert(endpoint->outgoing_connection_status().fd());
-	read->Insert(endpoint->incoming_connection_status().fd());
+	read->Insert(bstate->subscriber.fd());
+	read->Insert(bstate->status_subscriber.fd());
 
-	for ( const auto& ps : print_subscriptions )
-		read->Insert(ps.second.q.fd());
-
-	for ( const auto& ps : event_subscriptions )
-		read->Insert(ps.second.q.fd());
-
-	for ( const auto& ps : log_subscriptions )
-		read->Insert(ps.second.q.fd());
-
-	for ( const auto& s : data_stores )
-		read->Insert(s.second->store->responses().fd());
-
-	read->Insert(broker::report::default_queue->fd());
+	for ( auto& x : data_stores )
+		read->Insert(x.second->proxy.mailbox().descriptor());
 	}
 
-double bro_broker::Manager::NextTimestamp(double* local_network_time)
+double Manager::NextTimestamp(double* local_network_time)
 	{
-	if ( next_timestamp < 0 )
-		next_timestamp = timer_mgr->Time();
-
-	return next_timestamp;
+	// We're only asked for a timestamp if either (1) a FD was ready
+	// or (2) we're not idle (and we go idle if when Process is no-op),
+	// so there's no case where returning -1 to signify a skip will help.
+	return timer_mgr->Time();
 	}
 
-struct response_converter {
-	using result_type = RecordVal*;
-	broker::store::query::tag query_tag;
+void Manager::DispatchMessage(const broker::topic& topic, broker::data msg)
+	{
+	switch ( broker::zeek::Message::type(msg) ) {
+	case broker::zeek::Message::Type::Invalid:
+		reporter->Warning("received invalid broker message: %s",
+						  broker::to_string(msg).data());
+		break;
 
-	result_type operator()(bool d)
+	case broker::zeek::Message::Type::Event:
+		ProcessEvent(topic, std::move(msg));
+		break;
+
+	case broker::zeek::Message::Type::LogCreate:
+		ProcessLogCreate(std::move(msg));
+		break;
+
+	case broker::zeek::Message::Type::LogWrite:
+		ProcessLogWrite(std::move(msg));
+		break;
+
+	case broker::zeek::Message::Type::IdentifierUpdate:
+		ProcessIdentifierUpdate(std::move(msg));
+		break;
+
+	case broker::zeek::Message::Type::Batch:
 		{
-		switch ( query_tag ) {
-		case broker::store::query::tag::pop_left:
-		case broker::store::query::tag::pop_right:
-		case broker::store::query::tag::lookup:
-			// A boolean result means the key doesn't exist (if it did, then
-			// the result would contain the broker::data value, not a bool).
-			return new RecordVal(BifType::Record::Broker::Data);
-		default:
-			return bro_broker::make_data_val(broker::data{d});
-		}
-		}
+		broker::zeek::Batch batch(std::move(msg));
 
-	result_type operator()(uint64_t d)
-		{
-		return bro_broker::make_data_val(broker::data{d});
-		}
-
-	result_type operator()(broker::data& d)
-		{
-		return bro_broker::make_data_val(move(d));
-		}
-
-	result_type operator()(std::vector<broker::data>& d)
-		{
-		return bro_broker::make_data_val(broker::data{move(d)});
-		}
-
-	result_type operator()(broker::store::snapshot& d)
-		{
-		broker::table table;
-
-		for ( auto& item : d.entries )
+		if ( ! batch.valid() )
 			{
-			auto& key = item.first;
-			auto& val = item.second.item;
-			table[move(key)] = move(val);
+			reporter->Warning("received invalid broker Batch: %s",
+			                  broker::to_string(batch).data());
+			return;
 			}
 
-		return bro_broker::make_data_val(broker::data{move(table)});
-		}
-};
+		for ( auto& i : batch.batch() )
+			DispatchMessage(topic, std::move(i));
 
-static RecordVal* response_to_val(broker::store::response r)
-	{
-	return broker::visit(response_converter{r.request.type}, r.reply.value);
+		break;
+		}
+
+	default:
+		// We ignore unknown types so that we could add more in the
+		// future if we had too.
+		reporter->Warning("received unknown broker message: %s",
+						  broker::to_string(msg).data());
+		break;
+	}
 	}
 
-void bro_broker::Manager::Process()
+void Manager::Process()
 	{
-	auto outgoing_connection_updates =
-	        endpoint->outgoing_connection_status().want_pop();
-	auto incoming_connection_updates =
-	        endpoint->incoming_connection_status().want_pop();
+	bool had_input = false;
 
-	statistics.outgoing_conn_status_count += outgoing_connection_updates.size();
-	statistics.incoming_conn_status_count += incoming_connection_updates.size();
+	auto status_msgs = bstate->status_subscriber.poll();
 
-	for ( auto& u : outgoing_connection_updates )
+	for ( auto& status_msg : status_msgs )
 		{
-		switch ( u.status ) {
-		case broker::outgoing_connection_status::tag::established:
-			log_mgr->SendAllWritersTo(u.peer_name);
+		had_input = true;
 
-			if ( Broker::outgoing_connection_established )
-				{
-				val_list* vl = new val_list;
-				vl->append(new StringVal(u.relation.remote_tuple().first));
-				vl->append(new PortVal(u.relation.remote_tuple().second,
-				                       TRANSPORT_TCP));
-				vl->append(new StringVal(u.peer_name));
-				mgr.QueueEvent(Broker::outgoing_connection_established, vl);
-				}
-			break;
-
-		case broker::outgoing_connection_status::tag::disconnected:
-			if ( Broker::outgoing_connection_broken )
-				{
-				val_list* vl = new val_list;
-				vl->append(new StringVal(u.relation.remote_tuple().first));
-				vl->append(new PortVal(u.relation.remote_tuple().second,
-				                       TRANSPORT_TCP));
-				mgr.QueueEvent(Broker::outgoing_connection_broken, vl);
-				}
-			break;
-
-		case broker::outgoing_connection_status::tag::incompatible:
-			if ( Broker::outgoing_connection_incompatible )
-				{
-				val_list* vl = new val_list;
-				vl->append(new StringVal(u.relation.remote_tuple().first));
-				vl->append(new PortVal(u.relation.remote_tuple().second,
-				                       TRANSPORT_TCP));
-				mgr.QueueEvent(Broker::outgoing_connection_incompatible, vl);
-				}
-			break;
-
-		default:
-			reporter->InternalWarning(
-			            "unknown broker::outgoing_connection_status::tag : %d",
-			            static_cast<int>(u.status));
-			break;
-		}
-		}
-
-	for ( auto& u : incoming_connection_updates )
-		{
-		switch ( u.status ) {
-		case broker::incoming_connection_status::tag::established:
-			log_mgr->SendAllWritersTo(u.peer_name);
-
-			if ( Broker::incoming_connection_established )
-				{
-				val_list* vl = new val_list;
-				vl->append(new StringVal(u.peer_name));
-				mgr.QueueEvent(Broker::incoming_connection_established, vl);
-				}
-			break;
-
-		case broker::incoming_connection_status::tag::disconnected:
-			if ( Broker::incoming_connection_broken )
-				{
-				val_list* vl = new val_list;
-				vl->append(new StringVal(u.peer_name));
-				mgr.QueueEvent(Broker::incoming_connection_broken, vl);
-				}
-			break;
-
-		default:
-			reporter->InternalWarning(
-			            "unknown broker::incoming_connection_status::tag : %d",
-			            static_cast<int>(u.status));
-			break;
-		}
-		}
-
-	for ( auto& ps : print_subscriptions )
-		{
-		auto print_messages = ps.second.q.want_pop();
-
-		if ( print_messages.empty() )
-			continue;
-
-		ps.second.received += print_messages.size();
-
-		if ( ! Broker::print_handler )
-			continue;
-
-		for ( auto& pm : print_messages )
+		if ( auto stat = caf::get_if<broker::status>(&status_msg) )
 			{
-			if ( pm.size() != 1 )
-				{
-				reporter->Warning("got print message of invalid size: %zd",
-				                  pm.size());
-				continue;
-				}
-
-			std::string* msg = broker::get<std::string>(pm[0]);
-
-			if ( ! msg )
-				{
-				reporter->Warning("got print message of invalid type: %d",
-				                  static_cast<int>(broker::which(pm[0])));
-				continue;
-				}
-
-			val_list* vl = new val_list;
-			vl->append(new StringVal(move(*msg)));
-			mgr.QueueEvent(Broker::print_handler, vl);
+			ProcessStatus(std::move(*stat));
+			continue;
 			}
+
+		if ( auto err = caf::get_if<broker::error>(&status_msg) )
+			{
+			ProcessError(std::move(*err));
+			continue;
+			}
+
+		reporter->InternalWarning("ignoring status_subscriber message with unexpected type");
 		}
 
-	for ( auto& es : event_subscriptions )
+	auto messages = bstate->subscriber.poll();
+
+	for ( auto& message : messages )
 		{
-		auto event_messages = es.second.q.want_pop();
+		had_input = true;
 
-		if ( event_messages.empty() )
-			continue;
+		auto& topic = broker::get_topic(message);
+		auto& msg = broker::get_data(message);
 
-		es.second.received += event_messages.size();
-
-		for ( auto& em : event_messages )
+		try
 			{
-			if ( em.empty() )
-				{
-				reporter->Warning("got empty event message");
-				continue;
-				}
-
-			std::string* event_name = broker::get<std::string>(em[0]);
-
-			if ( ! event_name )
-				{
-				reporter->Warning("got event message w/o event name: %d",
-				                  static_cast<int>(broker::which(em[0])));
-				continue;
-				}
-
-			EventHandlerPtr ehp = event_registry->Lookup(event_name->data());
-
-			if ( ! ehp )
-				continue;
-
-			auto arg_types = ehp->FType()->ArgTypes()->Types();
-
-			if ( static_cast<size_t>(arg_types->length()) != em.size() - 1 )
-				{
-				reporter->Warning("got event message with invalid # of args,"
-				                  " got %zd, expected %d", em.size() - 1,
-				                  arg_types->length());
-				continue;
-				}
-
-			val_list* vl = new val_list;
-
-			for ( auto i = 1u; i < em.size(); ++i )
-				{
-				auto val = data_to_val(move(em[i]), (*arg_types)[i - 1]);
-
-				if ( val )
-					vl->append(val);
-				else
-					{
-					reporter->Warning("failed to convert remote event arg # %d",
-					                  i - 1);
-					break;
-					}
-				}
-
-			if ( static_cast<size_t>(vl->length()) == em.size() - 1 )
-				mgr.QueueEvent(ehp, vl);
-			else
-				delete_vals(vl);
+			DispatchMessage(topic, std::move(msg));
+			}
+		catch ( std::runtime_error& e )
+			{
+			reporter->Warning("ignoring invalid Broker message: %s", + e.what());
+			continue;
 			}
 		}
 
-	for ( auto& ls : log_subscriptions )
+	for ( auto& s : data_stores )
 		{
-		auto log_messages = ls.second.q.want_pop();
+		auto num_available = s.second->proxy.mailbox().size();
 
-		if ( log_messages.empty() )
-			continue;
-
-		ls.second.received += log_messages.size();
-
-		for ( auto& lm : log_messages )
+		if ( num_available > 0 )
 			{
-			if ( lm.size() < 1 )
-				{
-				reporter->Warning("got bad remote log message, no type field");
-				continue;
-				}
+			had_input = true;
+			auto responses = s.second->proxy.receive(num_available);
 
-			if ( lm[0] == "create" )
-				ProcessCreateLog(std::move(lm));
-			else if ( lm[0] == "write" )
-				ProcessWriteLog(std::move(lm));
-			else
-				reporter->Warning("got remote log w/o known type: %d",
-						  static_cast<int>(broker::which(lm[0])));
+			for ( auto& r : responses )
+				ProcessStoreResponse(s.second, move(r));
 			}
 		}
 
-	for ( const auto& s : data_stores )
+	if ( had_input )
 		{
-		auto responses = s.second->store->responses().want_pop();
+		if ( network_time == 0 )
+			// If we're getting Broker messages, but still haven't initialized
+			// network_time, may as well do so now because otherwise the
+			// broker/cluster logs will end up using timestamp 0.
+			net_update_time(current_time());
 
-		if ( responses.empty() )
-			continue;
+		++times_processed_without_idle;
 
-		statistics.report_count += responses.size();
-
-		for ( auto& response : responses )
+		// The max number of Process calls allowed to happen in a row without
+		// idling is chosen a bit arbitrarily, except 12 is around half of the
+		// SELECT_FREQUENCY (25).
+		//
+		// But probably the general idea should be for it to have some relation
+		// to the SELECT_FREQUENCY: less than it so other busy IOSources can
+		// fit several Process loops in before the next poll event (e.g. the
+		// select() call ), but still large enough such that we don't have to
+		// wait long before the next poll ourselves after being forced to idle.
+		if ( times_processed_without_idle > 12 )
 			{
-			auto ck = static_cast<StoreQueryCallback*>(response.cookie);
-			auto it = pending_queries.find(ck);
-
-			if ( it == pending_queries.end() )
-				{
-				reporter->Warning("unmatched response to query on store %s",
-				                  s.second->store->id().data());
-				continue;
-				}
-
-			auto query = *it;
-
-			if ( query->Disabled() )
-				{
-				// Trigger timer must have timed the query out already.
-				delete query;
-				pending_queries.erase(it);
-				continue;
-				}
-
-			switch ( response.reply.stat ) {
-			case broker::store::result::status::timeout:
-				// Fine, trigger's timeout takes care of things.
-				break;
-			case broker::store::result::status::failure:
-				query->Result(query_result());
-				break;
-			case broker::store::result::status::success:
-				query->Result(query_result(response_to_val(move(response))));
-				break;
-			default:
-				reporter->InternalWarning("unknown store response status: %d",
-				                         static_cast<int>(response.reply.stat));
-				break;
+			times_processed_without_idle = 0;
+			SetIdle(true);
 			}
-
-			delete query;
-			pending_queries.erase(it);
-			}
+		else
+			SetIdle(false);
 		}
-
-	auto reports = broker::report::default_queue->want_pop();
-	statistics.report_count += reports.size();
-
-	for ( auto& report : reports )
+	else
 		{
-		if ( report.size() < 2 )
-			{
-			reporter->Warning("got broker report msg of size %zu, expect 4",
-			                  report.size());
-			continue;
-			}
-
-		uint64_t* level = broker::get<uint64_t>(report[1]);
-
-		if ( ! level )
-			{
-			reporter->Warning("got broker report msg w/ bad level type: %d",
-			                  static_cast<int>(broker::which(report[1])));
-			continue;
-			}
-
-		auto lvl = static_cast<broker::report::level>(*level);
-
-		switch ( lvl ) {
-		case broker::report::level::debug:
-			DBG_LOG(DBG_BROKER, broker::to_string(report).data());
-			break;
-		case broker::report::level::info:
-			reporter->Info("broker info: %s",
-			               broker::to_string(report).data());
-			break;
-		case broker::report::level::warn:
-			reporter->Warning("broker warning: %s",
-			                  broker::to_string(report).data());
-			break;
-		case broker::report::level::error:
-			reporter->Error("broker error: %s",
-			                broker::to_string(report).data());
-			break;
-			}
+		times_processed_without_idle = 0;
+		SetIdle(true);
 		}
-
-	next_timestamp = -1;
 	}
 
-bool bro_broker::Manager::ProcessCreateLog(broker::message msg)
+
+void Manager::ProcessEvent(const broker::topic& topic, broker::zeek::Event ev)
 	{
-	if ( msg.size() != 5 )
+	if ( ! ev.valid() )
 		{
-		reporter->Warning("got bad remote log create size: %zd (expected 5)",
-				  msg.size());
+		reporter->Warning("received invalid broker Event: %s",
+		                  broker::to_string(ev.as_data()).data());
+		return;
+		}
+
+	auto name = std::move(ev.name());
+	auto args = std::move(ev.args());
+
+	DBG_LOG(DBG_BROKER, "Process event: %s %s",
+			name.data(), RenderMessage(args).data());
+	++statistics.num_events_incoming;
+	auto handler = event_registry->Lookup(name);
+
+	if ( ! handler )
+		return;
+
+	auto& topic_string = topic.string();
+
+	for ( auto i = 0u; i < forwarded_prefixes.size(); ++i )
+		{
+		auto& p = forwarded_prefixes[i];
+
+		if ( p.size() > topic_string.size() )
+			continue;
+
+		if ( strncmp(p.data(), topic_string.data(), p.size()) != 0 )
+			continue;
+
+		DBG_LOG(DBG_BROKER, "Skip processing of forwarded event: %s %s",
+		        name.data(), RenderMessage(args).data());
+		return;
+		}
+
+	auto arg_types = handler->FType(false)->ArgTypes()->Types();
+
+	if ( static_cast<size_t>(arg_types->length()) != args.size() )
+		{
+		reporter->Warning("got event message '%s' with invalid # of args,"
+				  " got %zd, expected %d", name.data(), args.size(),
+				  arg_types->length());
+		return;
+		}
+
+	val_list vl(args.size());
+
+	for ( auto i = 0u; i < args.size(); ++i )
+		{
+		auto got_type = args[i].get_type_name();
+		auto expected_type = (*arg_types)[i];
+		auto val = data_to_val(std::move(args[i]), expected_type);
+
+		if ( val )
+			vl.push_back(val);
+		else
+			{
+			auto expected_name = type_name(expected_type->Tag());
+
+			reporter->Warning("failed to convert remote event '%s' arg #%d,"
+					  " got %s, expected %s",
+					  name.data(), i, got_type,
+					  expected_name);
+
+			// If we got a vector and expected a function this is
+			// possibly because of a mismatch between
+			// anonymous-function bodies.
+			if ( strcmp(expected_name, "func") == 0 && strcmp("vector", got_type) == 0 )
+				reporter->Warning("when sending functions the receiver must have access to a"
+						  " version of that function.\nFor anonymous functions, that function must have the same body.");
+
+			break;
+			}
+		}
+
+	if ( static_cast<size_t>(vl.length()) == args.size() )
+		mgr.QueueEventFast(handler, std::move(vl), SOURCE_BROKER);
+	else
+		{
+		for ( const auto& v : vl )
+			Unref(v);
+		}
+	}
+
+bool bro_broker::Manager::ProcessLogCreate(broker::zeek::LogCreate lc)
+	{
+	DBG_LOG(DBG_BROKER, "Received log-create: %s", RenderMessage(lc.as_data()).c_str());
+	if ( ! lc.valid() )
+		{
+		reporter->Warning("received invalid broker LogCreate: %s",
+		                  broker::to_string(lc).data());
 		return false;
 		}
 
-	unsigned int idx = 1; // Skip type at index 0.
-
-	// Get stream ID.
-
-	if ( ! broker::get<broker::enum_value>(msg[idx]) )
-		{
-		reporter->Warning("got remote log create w/o stream id: %d",
-				  static_cast<int>(broker::which(msg[idx])));
-		return false;
-		}
-
-	auto stream_id = data_to_val(move(msg[idx]), log_id_type);
-
+	auto stream_id = data_to_val(std::move(lc.stream_id()), log_id_type);
 	if ( ! stream_id )
 		{
 		reporter->Warning("failed to unpack remote log stream id");
@@ -1018,19 +1087,8 @@ bool bro_broker::Manager::ProcessCreateLog(broker::message msg)
 		}
 
 	unref_guard stream_id_unreffer{stream_id};
-	++idx;
 
-	// Get writer ID.
-
-	if ( ! broker::get<broker::enum_value>(msg[idx]) )
-		{
-		reporter->Warning("got remote log create w/o writer id: %d",
-				  static_cast<int>(broker::which(msg[idx])));
-		return false;
-		}
-
-	auto writer_id = data_to_val(move(msg[idx]), writer_id_type);
-
+	auto writer_id = data_to_val(std::move(lc.writer_id()), writer_id_type);
 	if ( ! writer_id )
 		{
 		reporter->Warning("failed to unpack remote log writer id");
@@ -1038,30 +1096,16 @@ bool bro_broker::Manager::ProcessCreateLog(broker::message msg)
 		}
 
 	unref_guard writer_id_unreffer{writer_id};
-	++idx;
-
-	// Get writer info.
-
-	if ( ! broker::get<broker::record>(msg[idx]) )
-		{
-		reporter->Warning("got remote log create w/o writer info id: %d",
-				  static_cast<int>(broker::which(msg[idx])));
-		return false;
-		}
 
 	auto writer_info = std::unique_ptr<logging::WriterBackend::WriterInfo>(new logging::WriterBackend::WriterInfo);
-
-	if ( ! writer_info->FromBroker(std::move(msg[idx])) )
+	if ( ! writer_info->FromBroker(std::move(lc.writer_info())) )
 		{
 		reporter->Warning("failed to unpack remote log writer info");
 		return false;
 		}
 
-	++idx;
-
 	// Get log fields.
-
-	auto fields_data = broker::get<broker::vector>(msg[idx]);
+	auto fields_data = caf::get_if<broker::vector>(&lc.fields_data());
 
 	if ( ! fields_data )
 		{
@@ -1074,11 +1118,12 @@ bool bro_broker::Manager::ProcessCreateLog(broker::message msg)
 
 	for ( auto i = 0u; i < num_fields; ++i )
 		{
-		if ( auto field = data_to_threading_field((*fields_data)[i]) )
+		if ( auto field = data_to_threading_field(std::move((*fields_data)[i])) )
 			fields[i] = field;
 		else
 			{
 			reporter->Warning("failed to convert remote log field # %d", i);
+			delete [] fields;
 			return false;
 			}
 		}
@@ -1094,195 +1139,456 @@ bool bro_broker::Manager::ProcessCreateLog(broker::message msg)
 	return true;
 	}
 
-bool bro_broker::Manager::ProcessWriteLog(broker::message msg)
+bool bro_broker::Manager::ProcessLogWrite(broker::zeek::LogWrite lw)
 	{
-	if ( msg.size() != 5 )
+	DBG_LOG(DBG_BROKER, "Received log-write: %s", RenderMessage(lw.as_data()).c_str());
+
+	if ( ! lw.valid() )
 		{
-		reporter->Warning("got bad remote log size: %zd (expected 5)",
-				  msg.size());
+		reporter->Warning("received invalid broker LogWrite: %s",
+		                  broker::to_string(lw).data());
 		return false;
 		}
 
-	unsigned int idx = 1; // Skip type at index 0.
+	++statistics.num_logs_incoming;
+	auto& stream_id_name = lw.stream_id().name;
 
 	// Get stream ID.
-
-	if ( ! broker::get<broker::enum_value>(msg[idx]) )
-		{
-		reporter->Warning("got remote log w/o stream id: %d",
-				  static_cast<int>(broker::which(msg[idx])));
-		return false;
-		}
-
-	auto stream_id = data_to_val(move(msg[idx]), log_id_type);
+	auto stream_id = data_to_val(std::move(lw.stream_id()), log_id_type);
 
 	if ( ! stream_id )
 		{
-		reporter->Warning("failed to unpack remote log stream id");
+		reporter->Warning("failed to unpack remote log stream id: %s",
+		                  stream_id_name.data());
 		return false;
 		}
 
 	unref_guard stream_id_unreffer{stream_id};
-	++idx;
 
 	// Get writer ID.
-
-	if ( ! broker::get<broker::enum_value>(msg[idx]) )
-		{
-		reporter->Warning("got remote log w/o writer id: %d",
-				  static_cast<int>(broker::which(msg[idx])));
-		return false;
-		}
-
-	auto writer_id = data_to_val(move(msg[idx]), writer_id_type);
-
+	auto writer_id = data_to_val(std::move(lw.writer_id()), writer_id_type);
 	if ( ! writer_id )
 		{
-		reporter->Warning("failed to unpack remote log writer id");
+		reporter->Warning("failed to unpack remote log writer id for stream: %s", stream_id_name.data());
 		return false;
 		}
 
 	unref_guard writer_id_unreffer{writer_id};
-	++idx;
-
-	// Get path.
-
-	auto path = broker::get<std::string>(msg[idx]);
+	auto path = caf::get_if<std::string>(&lw.path());
 
 	if ( ! path )
 		{
-		reporter->Warning("failed to unpack remote log path");
+		reporter->Warning("failed to unpack remote log values (bad path variant) for stream: %s", stream_id_name.data());
 		return false;
 		}
 
-	++idx;
+	auto serial_data = caf::get_if<std::string>(&lw.serial_data());
 
-	// Get log values.
-
-	auto vals_data = broker::get<broker::vector>(msg[idx]);
-
-	if ( ! vals_data )
+	if ( ! serial_data )
 		{
-		reporter->Warning("failed to unpack remote log values");
+		reporter->Warning("failed to unpack remote log values (bad serial_data variant) for stream: %s", stream_id_name.data());
 		return false;
 		}
 
-	auto num_vals = vals_data->size();
-	auto vals = new threading::Value* [num_vals];
+	BinarySerializationFormat fmt;
+	fmt.StartRead(serial_data->data(), serial_data->size());
 
-	for ( auto i = 0u; i < num_vals; ++i )
+	int num_fields;
+	bool success = fmt.Read(&num_fields, "num_fields");
+
+	if ( ! success )
 		{
-		if ( auto val = data_to_threading_val((*vals_data)[i]) )
-			vals[i] = val;
-		else
+		reporter->Warning("failed to unserialize remote log num fields for stream: %s", stream_id_name.data());
+		return false;
+		}
+
+	auto vals = new threading::Value* [num_fields];
+
+	for ( int i = 0; i < num_fields; ++i )
+		{
+		vals[i] = new threading::Value;
+
+		if ( ! vals[i]->Read(&fmt) )
 			{
-			reporter->Warning("failed to convert remote log arg # %d", i);
+			for ( int j = 0; j <=i; ++j )
+				delete vals[j];
+
+			delete [] vals;
+			reporter->Warning("failed to unserialize remote log field %d for stream: %s", i, stream_id_name.data());
+
 			return false;
 			}
 		}
 
-	log_mgr->WriteFromRemote(stream_id->AsEnumVal(), writer_id->AsEnumVal(), *path, num_vals, vals);
+	log_mgr->WriteFromRemote(stream_id->AsEnumVal(), writer_id->AsEnumVal(),
+	                         std::move(*path), num_fields, vals);
+	fmt.EndRead();
 	return true;
 	}
 
-bool bro_broker::Manager::AddStore(StoreHandleVal* handle)
+bool Manager::ProcessIdentifierUpdate(broker::zeek::IdentifierUpdate iu)
 	{
-	if ( ! Enabled() )
-		return false;
+	DBG_LOG(DBG_BROKER, "Received id-update: %s", RenderMessage(iu.as_data()).c_str());
 
-	if ( ! handle->store )
-		return false;
-
-	auto key = make_pair(handle->store->id(), handle->store_type);
-
-	if ( data_stores.find(key) != data_stores.end() )
-		return false;
-
-	data_stores[key] = handle;
-	Ref(handle);
-	return true;
-	}
-
-bro_broker::StoreHandleVal*
-bro_broker::Manager::LookupStore(const broker::store::identifier& id,
-                           bro_broker::StoreType type)
-	{
-	if ( ! Enabled() )
-		return nullptr;
-
-	auto key = make_pair(id, type);
-	auto it = data_stores.find(key);
-
-	if ( it == data_stores.end() )
-		return nullptr;
-
-	return it->second;
-	}
-
-bool bro_broker::Manager::CloseStore(const broker::store::identifier& id,
-                               StoreType type)
-	{
-	if ( ! Enabled() )
-		return false;
-
-	auto key = make_pair(id, type);
-	auto it = data_stores.find(key);
-
-	if ( it == data_stores.end() )
-		return false;
-
-	for ( auto it = pending_queries.begin(); it != pending_queries.end(); )
+	if ( ! iu.valid() )
 		{
-		auto query = *it;
+		reporter->Warning("received invalid broker IdentifierUpdate: %s",
+		                  broker::to_string(iu).data());
+		return false;
+		}
 
-		if ( query->GetStoreType() == type && query->StoreID() == id )
+	++statistics.num_ids_incoming;
+	auto id_name = std::move(iu.id_name());
+	auto id_value = std::move(iu.id_value());
+	auto id = global_scope()->Lookup(id_name);
+
+	if ( ! id )
+		{
+		reporter->Warning("Received id-update request for unkown id: %s",
+		                 id_name.c_str());
+		return false;
+		}
+
+	auto val = data_to_val(std::move(id_value), id->Type());
+
+	if ( ! val )
+		{
+		reporter->Error("Failed to receive ID with unsupported type: %s (%s)",
+		                id_name.c_str(), type_name(id->Type()->Tag()));
+		return false;
+		}
+
+	id->SetVal(val);
+	return true;
+	}
+
+void Manager::ProcessStatus(broker::status stat)
+	{
+	DBG_LOG(DBG_BROKER, "Received status message: %s", RenderMessage(stat).c_str());
+
+	auto ctx = stat.context<broker::endpoint_info>();
+
+	EventHandlerPtr event;
+	switch (stat.code()) {
+	case broker::sc::unspecified:
+		event = Broker::status;
+		break;
+
+	case broker::sc::peer_added:
+		++peer_count;
+		assert(ctx);
+		log_mgr->SendAllWritersTo(*ctx);
+		event = Broker::peer_added;
+		break;
+
+	case broker::sc::peer_removed:
+		--peer_count;
+		event = Broker::peer_removed;
+		break;
+
+	case broker::sc::peer_lost:
+		--peer_count;
+		event = Broker::peer_lost;
+		break;
+	}
+
+	if ( ! event )
+		return;
+
+	auto ei = internal_type("Broker::EndpointInfo")->AsRecordType();
+	auto endpoint_info = new RecordVal(ei);
+
+	if ( ctx )
+		{
+		endpoint_info->Assign(0, new StringVal(to_string(ctx->node)));
+		auto ni = internal_type("Broker::NetworkInfo")->AsRecordType();
+		auto network_info = new RecordVal(ni);
+
+		if ( ctx->network )
 			{
-			it = pending_queries.erase(it);
-			query->Abort();
-			delete query;
+			network_info->Assign(0, new StringVal(ctx->network->address.data()));
+			network_info->Assign(1, val_mgr->GetPort(ctx->network->port, TRANSPORT_TCP));
 			}
 		else
-			++it;
+			{
+			// TODO: are there any status messages where the ctx->network
+			// is not set and actually could be?
+			network_info->Assign(0, new StringVal("<unknown>"));
+			network_info->Assign(1, val_mgr->GetPort(0, TRANSPORT_TCP));
+			}
+
+		endpoint_info->Assign(1, network_info);
 		}
 
-	delete it->second->store;
-	it->second->store = nullptr;
-	Unref(it->second);
-	data_stores.erase(it);
+	auto str = stat.message();
+	auto msg = new StringVal(str ? *str : "");
+
+	mgr.QueueEventFast(event, {endpoint_info, msg});
+	}
+
+void Manager::ProcessError(broker::error err)
+	{
+	DBG_LOG(DBG_BROKER, "Received error message: %s", RenderMessage(err).c_str());
+
+	if ( ! Broker::error )
+		return;
+
+	BifEnum::Broker::ErrorCode ec;
+	std::string msg;
+
+	if ( err.category() == caf::atom("broker") )
+		{
+		msg = caf::to_string(err.context());
+
+		switch ( static_cast<broker::ec>(err.code()) ) {
+		case broker::ec::peer_incompatible:
+			ec = BifEnum::Broker::ErrorCode::PEER_INCOMPATIBLE;
+			break;
+
+		case broker::ec::peer_invalid:
+			ec = BifEnum::Broker::ErrorCode::PEER_INVALID;
+			break;
+
+		case broker::ec::peer_unavailable:
+			ec = BifEnum::Broker::ErrorCode::PEER_UNAVAILABLE;
+			break;
+
+		case broker::ec::peer_timeout:
+			ec = BifEnum::Broker::ErrorCode::PEER_TIMEOUT;
+			break;
+
+		case broker::ec::master_exists:
+			ec = BifEnum::Broker::ErrorCode::MASTER_EXISTS;
+			break;
+
+		case broker::ec::no_such_master:
+			ec = BifEnum::Broker::ErrorCode::NO_SUCH_MASTER;
+			break;
+
+		case broker::ec::no_such_key:
+			ec = BifEnum::Broker::ErrorCode::NO_SUCH_KEY;
+			break;
+
+		case broker::ec::request_timeout:
+			ec = BifEnum::Broker::ErrorCode::REQUEST_TIMEOUT;
+			break;
+
+		case broker::ec::type_clash:
+			ec = BifEnum::Broker::ErrorCode::TYPE_CLASH;
+			break;
+
+		case broker::ec::invalid_data:
+			ec = BifEnum::Broker::ErrorCode::INVALID_DATA;
+			break;
+
+		case broker::ec::backend_failure:
+			ec = BifEnum::Broker::ErrorCode::BACKEND_FAILURE;
+			break;
+
+		case broker::ec::stale_data:
+			ec = BifEnum::Broker::ErrorCode::STALE_DATA;
+			break;
+
+		case broker::ec::unspecified: // fall-through
+		default:
+			ec = BifEnum::Broker::ErrorCode::UNSPECIFIED;
+		}
+		}
+	else
+		{
+		ec = BifEnum::Broker::ErrorCode::CAF_ERROR;
+		msg = fmt("[%s] %s", caf::to_string(err.category()).c_str(), caf::to_string(err.context()).c_str());
+		}
+
+	mgr.QueueEventFast(Broker::error, {
+		BifType::Enum::Broker::ErrorCode->GetVal(ec),
+		new StringVal(msg),
+	});
+	}
+
+void Manager::ProcessStoreResponse(StoreHandleVal* s, broker::store::response response)
+	{
+	DBG_LOG(DBG_BROKER, "Received store response: %s", RenderMessage(response).c_str());
+
+	auto request = pending_queries.find(std::make_pair(response.id, s));
+
+	if ( request == pending_queries.end() )
+		{
+		reporter->Warning("unmatched response to query %" PRIu64 " on store %s",
+				  response.id, s->store.name().c_str());
+		return;
+		}
+
+	if ( request->second->Disabled() )
+		{
+		// Trigger timer must have timed the query out already.
+		delete request->second;
+		pending_queries.erase(request);
+		return;
+		}
+
+	if ( response.answer )
+		request->second->Result(query_result(make_data_val(std::move(*response.answer))));
+	else if ( response.answer.error() == broker::ec::request_timeout )
+		{
+		// Fine, trigger's timeout takes care of things.
+		}
+	else if ( response.answer.error() == broker::ec::stale_data )
+		{
+		// It's sort of arbitrary whether to make this type of error successful
+		// query with a "fail" status versus going through the when stmt timeout
+		// code path.  I think the timeout path is maybe more expected in order
+		// for failures like "no such key" to actually be distinguishable from
+		// this type of error (which is less easily handled programmatically).
+		}
+	else if ( response.answer.error() == broker::ec::no_such_key )
+		request->second->Result(query_result());
+	else
+		reporter->InternalWarning("unknown store response status: %s",
+					  to_string(response.answer.error()).c_str());
+
+	delete request->second;
+	pending_queries.erase(request);
+	}
+
+StoreHandleVal* Manager::MakeMaster(const string& name, broker::backend type,
+                                    broker::backend_options opts)
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return nullptr;
+
+	if ( LookupStore(name) )
+		return nullptr;
+
+	DBG_LOG(DBG_BROKER, "Creating master for data store %s", name.c_str());
+
+	auto it = opts.find("path");
+
+	if ( it == opts.end() )
+		it = opts.emplace("path", "").first;
+
+	if ( it->second == broker::data("") )
+		{
+		auto suffix = ".store";
+
+		switch ( type ) {
+		case broker::backend::sqlite:
+			suffix = ".sqlite";
+			break;
+		case broker::backend::rocksdb:
+			suffix = ".rocksdb";
+			break;
+		default:
+			break;
+		}
+
+		it->second = name + suffix;
+		}
+
+	auto result = bstate->endpoint.attach_master(name, type, move(opts));
+	if ( ! result )
+		{
+		Error("Failed to attach master store %s:",
+		      to_string(result.error()).c_str());
+		return nullptr;
+		}
+
+	auto handle = new StoreHandleVal{*result};
+	Ref(handle);
+
+	data_stores.emplace(name, handle);
+
+	if ( bstate->endpoint.use_real_time() )
+		return handle;
+
+	// Wait for master to become available/responsive.
+	// Possibly avoids timeouts in scripts during unit tests.
+	handle->store.exists("");
+	return handle;
+	}
+
+StoreHandleVal* Manager::MakeClone(const string& name, double resync_interval,
+                                   double stale_interval,
+                                   double mutation_buffer_interval)
+	{
+	if ( bstate->endpoint.is_shutdown() )
+		return nullptr;
+
+	if ( LookupStore(name) )
+		return nullptr;
+
+	DBG_LOG(DBG_BROKER, "Creating clone for data store %s", name.c_str());
+
+	auto result = bstate->endpoint.attach_clone(name, resync_interval,
+	                                            stale_interval,
+	                                            mutation_buffer_interval);
+	if ( ! result )
+		{
+		Error("Failed to attach clone store %s:",
+		      to_string(result.error()).c_str());
+		return nullptr;
+		}
+
+	auto handle = new StoreHandleVal{*result};
+	Ref(handle);
+
+	data_stores.emplace(name, handle);
+
+	return handle;
+	}
+
+StoreHandleVal* Manager::LookupStore(const string& name)
+	{
+	auto i = data_stores.find(name);
+	return i == data_stores.end() ? nullptr : i->second;
+	}
+
+bool Manager::CloseStore(const string& name)
+	{
+	DBG_LOG(DBG_BROKER, "Closing data store %s", name.c_str());
+
+	auto s = data_stores.find(name);
+	if ( s == data_stores.end() )
+		return false;
+
+	for ( auto i = pending_queries.begin(); i != pending_queries.end(); )
+		if ( i->second->Store().name() == name )
+			{
+			i->second->Abort();
+			delete i->second;
+			i = pending_queries.erase(i);
+			}
+	else
+		{
+		++i;
+		}
+
+	Unref(s->second);
+	data_stores.erase(s);
 	return true;
 	}
 
-bool bro_broker::Manager::TrackStoreQuery(StoreQueryCallback* cb)
+bool Manager::TrackStoreQuery(StoreHandleVal* handle, broker::request_id id,
+                              StoreQueryCallback* cb)
 	{
-	assert(Enabled());
-	return pending_queries.insert(cb).second;
-	}
+	auto rval = pending_queries.emplace(std::make_pair(id, handle), cb).second;
 
-bro_broker::Stats bro_broker::Manager::ConsumeStatistics()
-	{
-	statistics.outgoing_peer_count = peers.size();
-	statistics.data_store_count = data_stores.size();
-	statistics.pending_query_count = pending_queries.size();
+	if ( bstate->endpoint.use_real_time() )
+		return rval;
 
-	for ( auto& s : print_subscriptions )
-		{
-		statistics.print_count[s.first] = s.second.received;
-		s.second.received = 0;
-		}
-
-	for ( auto& s : event_subscriptions )
-		{
-		statistics.event_count[s.first] = s.second.received;
-		s.second.received = 0;
-		}
-
-	for ( auto& s : log_subscriptions )
-		{
-		statistics.log_count[s.first] = s.second.received;
-		s.second.received = 0;
-		}
-
-	auto rval = move(statistics);
-	statistics = Stats{};
+	FlushPendingQueries();
 	return rval;
 	}
+
+const Stats& Manager::GetStatistics()
+	{
+	statistics.num_peers = peer_count;
+	statistics.num_stores = data_stores.size();
+	statistics.num_pending_queries = pending_queries.size();
+
+	// The other attributes are set as activity happens.
+
+	return statistics;
+	}
+
+} // namespace bro_broker

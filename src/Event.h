@@ -4,19 +4,23 @@
 #define event_h
 
 #include "EventRegistry.h"
-#include "Serializer.h"
 
 #include "analyzer/Tag.h"
 #include "analyzer/Analyzer.h"
 
 class EventMgr;
 
+// We don't Unref() the individual arguments by using delete_vals()
+// in a dtor because Func::Call already does that.
 class Event : public BroObj {
 public:
+	Event(EventHandlerPtr handler, val_list args,
+		SourceID src = SOURCE_LOCAL, analyzer::ID aid = 0,
+		TimerMgr* mgr = 0, BroObj* obj = 0);
+
 	Event(EventHandlerPtr handler, val_list* args,
 		SourceID src = SOURCE_LOCAL, analyzer::ID aid = 0,
 		TimerMgr* mgr = 0, BroObj* obj = 0);
-	~Event();
 
 	void SetNext(Event* n)		{ next_event = n; }
 	Event* NextEvent() const	{ return next_event; }
@@ -25,46 +29,19 @@ public:
 	analyzer::ID Analyzer() const	{ return aid; }
 	TimerMgr* Mgr() const		{ return mgr; }
 	EventHandlerPtr Handler() const	{ return handler; }
-	val_list* Args() const	{ return args; }
+	const val_list* Args() const	{ return &args; }
 
-	void Describe(ODesc* d) const;
+	void Describe(ODesc* d) const override;
 
 protected:
 	friend class EventMgr;
 
 	// This method is protected to make sure that everybody goes through
 	// EventMgr::Dispatch().
-	void Dispatch(bool no_remote = false)
-		{
-		if ( event_serializer )
-			{
-			SerialInfo info(event_serializer);
-			event_serializer->Serialize(&info, handler->Name(), args);
-			}
-
-		if ( handler->ErrorHandler() )
-			reporter->BeginErrorHandler();
-
-		try
-			{
-			handler->Call(args, no_remote);
-			}
-
-		catch ( InterpreterException& e )
-			{
-			// Already reported.
-			}
-
-		if ( obj )
-			// obj->EventDone();
-			Unref(obj);
-
-		if ( handler->ErrorHandler() )
-			reporter->EndErrorHandler();
-		}
+	void Dispatch(bool no_remote = false);
 
 	EventHandlerPtr handler;
-	val_list* args;
+	val_list args;
 	SourceID src;
 	analyzer::ID aid;
 	TimerMgr* mgr;
@@ -72,22 +49,58 @@ protected:
 	Event* next_event;
 };
 
-extern uint64 num_events_queued;
-extern uint64 num_events_dispatched;
+extern uint64_t num_events_queued;
+extern uint64_t num_events_dispatched;
 
 class EventMgr : public BroObj {
 public:
 	EventMgr();
-	~EventMgr();
+	~EventMgr() override;
 
-	void QueueEvent(EventHandlerPtr h, val_list* vl,
+	// Queues an event without first checking if there's any available event
+	// handlers (or remote consumers).  If it turns out there's actually
+	// nothing that will consume the event, then this may leak memory due to
+	// failing to decrement the reference count of each element in 'vl'.  i.e.
+	// use this function instead of QueueEvent() if you've already guarded
+	// against the case where there's no handlers (one usually also does that
+	// because it would be a waste of effort to construct all the event
+	// arguments when there's no handlers to consume them).
+	void QueueEventFast(const EventHandlerPtr &h, val_list vl,
+			SourceID src = SOURCE_LOCAL, analyzer::ID aid = 0,
+			TimerMgr* mgr = 0, BroObj* obj = 0)
+		{
+		QueueEvent(new Event(h, std::move(vl), src, aid, mgr, obj));
+		}
+
+	// Queues an event if there's an event handler (or remote consumer).  This
+	// function always takes ownership of decrementing the reference count of
+	// each element of 'vl', even if there's no event handler.  If you've
+	// checked for event handler existence, you may wish to call
+	// QueueEventFast() instead of this function to prevent the redundant
+	// existence check.
+	void QueueEvent(const EventHandlerPtr &h, val_list vl,
 			SourceID src = SOURCE_LOCAL, analyzer::ID aid = 0,
 			TimerMgr* mgr = 0, BroObj* obj = 0)
 		{
 		if ( h )
-			QueueEvent(new Event(h, vl, src, aid, mgr, obj));
+			QueueEvent(new Event(h, std::move(vl), src, aid, mgr, obj));
 		else
-			delete_vals(vl);
+			{
+			for ( const auto& v : vl )
+				Unref(v);
+			}
+		}
+
+	// Same as QueueEvent, except taking the event's argument list via a
+	// pointer instead of by value.  This function takes ownership of the
+	// memory pointed to by 'vl' as well as decrementing the reference count of
+	// each of its elements.
+	void QueueEvent(const EventHandlerPtr &h, val_list* vl,
+			SourceID src = SOURCE_LOCAL, analyzer::ID aid = 0,
+			TimerMgr* mgr = 0, BroObj* obj = 0)
+		{
+		QueueEvent(h, std::move(*vl), src, aid, mgr, obj);
+		delete vl;
 		}
 
 	void Dispatch(Event* event, bool no_remote = false)
@@ -115,10 +128,7 @@ public:
 	int Size() const
 		{ return num_events_queued - num_events_dispatched; }
 
-	// Returns a peer record describing the local Bro.
-	RecordVal* GetLocalPeerVal();
-
-	void Describe(ODesc* d) const;
+	void Describe(ODesc* d) const override;
 
 protected:
 	void QueueEvent(Event* event);

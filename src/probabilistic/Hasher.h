@@ -3,16 +3,23 @@
 #ifndef PROBABILISTIC_HASHER_H
 #define PROBABILISTIC_HASHER_H
 
+#include <broker/data.hh>
+#include <broker/expected.hh>
+
+#include <memory>
+
 #include "Hash.h"
-#include "SerialObj.h"
 
 namespace probabilistic {
+
+/** Types of derived Hasher classes. */
+enum HasherType { Default, Double };
 
 /**
  * Abstract base class for hashers. A hasher creates a family of hash
  * functions to hash an element *k* times.
  */
-class Hasher : public SerialObj {
+class Hasher {
 public:
 	typedef hash_t digest;
 	typedef std::vector<digest> digest_vector;
@@ -99,12 +106,10 @@ public:
 	 */
 	seed_t Seed() const	{ return seed; }
 
-	bool Serialize(SerialInfo* info) const;
-	static Hasher* Unserialize(UnserialInfo* info);
+	broker::expected<broker::data> Serialize() const;
+	static std::unique_ptr<Hasher> Unserialize(const broker::data& data);
 
 protected:
-	DECLARE_ABSTRACT_SERIAL(Hasher);
-
 	Hasher() { }
 
 	/**
@@ -115,6 +120,8 @@ protected:
 	 * @param arg_seed The seed for the hasher.
 	 */
 	Hasher(size_t arg_k, seed_t arg_seed);
+
+	virtual HasherType Type() const = 0;
 
 private:
 	size_t k;
@@ -138,7 +145,7 @@ public:
 	 *
 	 * @param arg_seed The seed to use for this instance.
 	 */
-	UHF(Hasher::seed_t arg_seed);
+	explicit UHF(Hasher::seed_t arg_seed);
 
 	template <typename T>
 	Hasher::digest operator()(const T& x) const
@@ -181,6 +188,9 @@ public:
 		return ! (x == y);
 		}
 
+	broker::expected<broker::data> Serialize() const;
+	static UHF Unserialize(const broker::data& data);
+
 private:
 	static size_t compute_seed(Hasher::seed_t seed);
 
@@ -204,14 +214,15 @@ public:
 	DefaultHasher(size_t k, Hasher::seed_t seed);
 
 	// Overridden from Hasher.
-	virtual digest_vector Hash(const void* x, size_t n) const final;
-	virtual DefaultHasher* Clone() const final;
-	virtual bool Equals(const Hasher* other) const final;
-
-	DECLARE_SERIAL(DefaultHasher);
+	digest_vector Hash(const void* x, size_t n) const final;
+	DefaultHasher* Clone() const final;
+	bool Equals(const Hasher* other) const final;
 
 private:
 	DefaultHasher() { }
+
+	HasherType Type() const override
+		{ return HasherType::Default; }
 
 	std::vector<UHF> hash_functions;
 };
@@ -232,14 +243,15 @@ public:
 	DoubleHasher(size_t k, Hasher::seed_t seed);
 
 	// Overridden from Hasher.
-	virtual digest_vector Hash(const void* x, size_t n) const final;
-	virtual DoubleHasher* Clone() const final;
-	virtual bool Equals(const Hasher* other) const final;
-
-	DECLARE_SERIAL(DoubleHasher);
+	digest_vector Hash(const void* x, size_t n) const final;
+	DoubleHasher* Clone() const final;
+	bool Equals(const Hasher* other) const final;
 
 private:
 	DoubleHasher() { }
+
+	HasherType Type() const override
+		{ return HasherType::Double; }
 
 	UHF h1;
 	UHF h2;

@@ -22,6 +22,7 @@
 #define ANALYZER_MANAGER_H
 
 #include <queue>
+#include <vector>
 
 #include "Analyzer.h"
 #include "Component.h"
@@ -77,10 +78,10 @@ public:
 
 	/**
 	 * Dumps out the state of all registered analyzers to the \c analyzer
-	 * debug stream. Should be called only after any \c bro_init events
+	 * debug stream. Should be called only after any \c zeek_init events
 	 * have executed to ensure that any of their changes are applied.
 	 */
-	void DumpDebug(); // Called after bro_init() events.
+	void DumpDebug(); // Called after zeek_init() events.
 
 	/**
 	 * Enables an analyzer type. Only enabled analyzers will be
@@ -114,7 +115,7 @@ public:
 	bool DisableAnalyzer(Tag tag);
 
 	/**
-	 * Enables an analyzer type. Disabled analyzers will not be
+	 * Disables an analyzer type. Disabled analyzers will not be
 	 * instantiated for new connections.
 	 *
 	 * @param tag The analyzer's tag as an enum of script type \c
@@ -179,7 +180,7 @@ public:
 	 *
 	 * @return True if successful.
 	 */
-	bool RegisterAnalyzerForPort(Tag tag, TransportProto proto, uint32 port);
+	bool RegisterAnalyzerForPort(Tag tag, TransportProto proto, uint32_t port);
 
 	/**
 	 * Unregisters a well-known port for an anlyzers.
@@ -207,7 +208,7 @@ public:
 	 * @param tag The analyzer's tag as an enum of script type \c
 	 * Analyzer::Tag.
 	 */
-	bool UnregisterAnalyzerForPort(Tag tag, TransportProto proto, uint32 port);
+	bool UnregisterAnalyzerForPort(Tag tag, TransportProto proto, uint32_t port);
 
 	/**
 	 * Instantiates a new analyzer instance for a connection.
@@ -268,7 +269,7 @@ public:
 	 * @param timeout An interval after which to timeout the request to
 	 * schedule this analyzer. Must be non-zero.
 	 */
-	void ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp, uint16 resp_p,
+	void ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp, uint16_t resp_p,
 				TransportProto proto, Tag analyzer, double timeout);
 
 	/**
@@ -292,7 +293,7 @@ public:
 	 * @param timeout An interval after which to timeout the request to
 	 * schedule this analyzer. Must be non-zero.
 	 */
-	void ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp, uint16 resp_p,
+	void ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp, uint16_t resp_p,
 				TransportProto proto, const char* analyzer,
 				double timeout);
 
@@ -335,12 +336,18 @@ public:
 	void ScheduleAnalyzer(const IPAddr& orig, const IPAddr& resp, PortVal* resp_p,
 			      Val* analyzer, double timeout);
 
+	/**
+	 * @return the UDP port numbers to be associated with VXLAN traffic.
+	 */
+	const std::vector<uint16_t>& GetVxlanPorts() const
+		{ return vxlan_ports; }
+
 private:
 	typedef set<Tag> tag_set;
-	typedef map<uint32, tag_set*> analyzer_map_by_port;
+	typedef map<uint32_t, tag_set*> analyzer_map_by_port;
 
 	tag_set* LookupPort(PortVal* val, bool add_if_not_found);
-	tag_set* LookupPort(TransportProto proto, uint32 port, bool add_if_not_found);
+	tag_set* LookupPort(TransportProto proto, uint32_t port, bool add_if_not_found);
 
 	tag_set GetScheduled(const Connection* conn);
 	void ExpireScheduledAnalyzers();
@@ -348,9 +355,7 @@ private:
 	analyzer_map_by_port analyzers_by_port_tcp;
 	analyzer_map_by_port analyzers_by_port_udp;
 
-	Tag analyzer_backdoor;
 	Tag analyzer_connsize;
-	Tag analyzer_interconn;
 	Tag analyzer_stepping;
 	Tag analyzer_tcpstats;
 
@@ -360,11 +365,11 @@ private:
 	struct ConnIndex {
 		IPAddr orig;
 		IPAddr resp;
-		uint16 resp_p;
-		uint16 proto;
+		uint16_t resp_p;
+		uint16_t proto;
 
 		ConnIndex(const IPAddr& _orig, const IPAddr& _resp,
-			     uint16 _resp_p, uint16 _proto);
+			     uint16_t _resp_p, uint16_t _proto);
 		ConnIndex();
 
 		bool operator<(const ConnIndex& other) const;
@@ -390,6 +395,7 @@ private:
 
 	conns_map conns;
 	conns_queue conns_by_timeout;
+	std::vector<uint16_t> vxlan_ports;
 };
 
 }

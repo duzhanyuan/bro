@@ -1,11 +1,11 @@
-include(BroPlugin)
+include(ZeekPlugin)
 
 include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 include_directories(AFTER  ${CMAKE_CURRENT_BINARY_DIR}/../dce-rpc)
 
-bro_plugin_begin(Bro SMB)
-bro_plugin_cc(SMB.cc Plugin.cc)
-bro_plugin_bif(
+zeek_plugin_begin(Zeek SMB)
+zeek_plugin_cc(SMB.cc Plugin.cc)
+zeek_plugin_bif(
 	smb1_com_check_directory.bif
 	smb1_com_close.bif
 	smb1_com_create_directory.bif
@@ -18,7 +18,9 @@ bro_plugin_bif(
 	smb1_com_read_andx.bif
 	smb1_com_session_setup_andx.bif
 	smb1_com_transaction.bif
+	smb1_com_transaction_secondary.bif
 	smb1_com_transaction2.bif
+	smb1_com_transaction2_secondary.bif
 	smb1_com_tree_connect_andx.bif
 	smb1_com_tree_disconnect.bif
 	smb1_com_write_andx.bif
@@ -33,13 +35,14 @@ bro_plugin_bif(
 	smb2_com_tree_connect.bif
 	smb2_com_tree_disconnect.bif
 	smb2_com_write.bif
+	smb2_com_transform_header.bif
 	smb2_events.bif
 
 	events.bif
 	consts.bif
 
 	types.bif)
-bro_plugin_pac(
+zeek_plugin_pac(
 	smb.pac
 	smb-common.pac
 	smb-strings.pac
@@ -65,6 +68,7 @@ bro_plugin_pac(
 	smb1-com-transaction-secondary.pac
 	smb1-com-transaction.pac
 	smb1-com-transaction2.pac
+	smb1-com-transaction2-secondary.pac
 	smb1-com-tree-connect-andx.pac
 	smb1-com-tree-disconnect.pac
 	smb1-com-write-andx.pac
@@ -81,5 +85,6 @@ bro_plugin_pac(
 	smb2-com-tree-connect.pac
 	smb2-com-tree-disconnect.pac
 	smb2-com-write.pac
+	smb2-com-transform-header.pac
 )
-bro_plugin_end()
+zeek_plugin_end()

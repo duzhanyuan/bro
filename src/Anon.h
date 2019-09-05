@@ -37,7 +37,7 @@ enum ip_addr_anonymization_method_t {
 	NUM_ADDR_ANONYMIZATION_METHODS,
 };
 
-typedef uint32 ipaddr32_t;
+typedef uint32_t ipaddr32_t;
 
 // NOTE: all addresses in parameters of *public* functions are in
 // network order.
@@ -66,7 +66,7 @@ protected:
 class AnonymizeIPAddr_Seq : public AnonymizeIPAddr {
 public:
 	AnonymizeIPAddr_Seq()	{ seq = 1; }
-	ipaddr32_t anonymize(ipaddr32_t addr);
+	ipaddr32_t anonymize(ipaddr32_t addr) override;
 
 protected:
 	ipaddr32_t seq;
@@ -74,12 +74,12 @@ protected:
 
 class AnonymizeIPAddr_RandomMD5 : public AnonymizeIPAddr {
 public:
-	ipaddr32_t anonymize(ipaddr32_t addr);
+	ipaddr32_t anonymize(ipaddr32_t addr) override;
 };
 
 class AnonymizeIPAddr_PrefixMD5 : public AnonymizeIPAddr {
 public:
-	ipaddr32_t anonymize(ipaddr32_t addr);
+	ipaddr32_t anonymize(ipaddr32_t addr) override;
 
 protected:
 	struct anon_prefix {
@@ -91,10 +91,10 @@ protected:
 class AnonymizeIPAddr_A50 : public AnonymizeIPAddr {
 public:
 	AnonymizeIPAddr_A50()	{ init(); }
-	~AnonymizeIPAddr_A50();
+	~AnonymizeIPAddr_A50() override;
 
-	ipaddr32_t anonymize(ipaddr32_t addr);
-	int PreservePrefix(ipaddr32_t input, int num_bits);
+	ipaddr32_t anonymize(ipaddr32_t addr) override;
+	int PreservePrefix(ipaddr32_t input, int num_bits) override;
 
 protected:
 	struct Node {

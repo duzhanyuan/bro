@@ -10,8 +10,8 @@ set(bro_ALL_GENERATED_OUTPUTS  CACHE INTERNAL "automatically generated files" FO
 set(bro_AUTO_BIFS     CACHE INTERNAL "BIFs for automatic inclusion" FORCE)
 set(bro_REGISTER_BIFS CACHE INTERNAL "BIFs for automatic registering" FORCE)
 
-set(bro_BASE_BIF_SCRIPTS CACHE INTERNAL "Bro script stubs for BIFs in base distribution of Bro" FORCE)
-set(bro_PLUGIN_BIF_SCRIPTS CACHE INTERNAL "Bro script stubs for BIFs in Bro plugins" FORCE)
+set(bro_BASE_BIF_SCRIPTS CACHE INTERNAL "Zeek script stubs for BIFs in base distribution of Zeek" FORCE)
+set(bro_PLUGIN_BIF_SCRIPTS CACHE INTERNAL "Zeek script stubs for BIFs in Zeek plugins" FORCE)
 
 # If TRUE, use CMake's object libraries for sub-directories instead of
 # static libraries. This requires CMake >= 2.8.8.
@@ -52,6 +52,7 @@ bison_target(BIFParser builtin-func.y
              COMPILE_FLAGS "${BISON_FLAGS}")
 flex_target(BIFScanner builtin-func.l ${CMAKE_CURRENT_BINARY_DIR}/bif_lex.cc)
 add_flex_bison_dependency(BIFScanner BIFParser)
+set_property(SOURCE bif_lex.cc APPEND_STRING PROPERTY COMPILE_FLAGS "-Wno-sign-compare")
 
 # Rule parser/scanner
 bison_target(RuleParser rule-parse.y
@@ -67,6 +68,7 @@ replace_yy_prefix_target(${CMAKE_CURRENT_BINARY_DIR}/rup.h
                          rules_ rules_)
 flex_target(RuleScanner rule-scan.l ${CMAKE_CURRENT_BINARY_DIR}/rule-scan.cc
             COMPILE_FLAGS "-Prules_")
+set_property(SOURCE rule-scan.cc APPEND_STRING PROPERTY COMPILE_FLAGS "-Wno-sign-compare")
 
 # RE parser/scanner
 bison_target(REParser re-parse.y
@@ -80,6 +82,7 @@ replace_yy_prefix_target(${CMAKE_CURRENT_BINARY_DIR}/rep.cc
 flex_target(REScanner re-scan.l ${CMAKE_CURRENT_BINARY_DIR}/re-scan.cc
             COMPILE_FLAGS "-Pre_")
 add_flex_bison_dependency(REScanner REParser)
+set_property(SOURCE re-scan.cc APPEND_STRING PROPERTY COMPILE_FLAGS "-Wno-sign-compare")
 
 # Parser/Scanner
 bison_target(Parser parse.y
@@ -92,24 +95,7 @@ replace_yy_prefix_target(${CMAKE_CURRENT_BINARY_DIR}/p.cc
                          bro yy)
 flex_target(Scanner scan.l ${CMAKE_CURRENT_BINARY_DIR}/scan.cc
             COMPILE_FLAGS "-Pbro")
-
-########################################################################
-## bifcl (BIF compiler) target
-
-set(bifcl_SRCS
-   ${BISON_BIFParser_INPUT}
-   ${FLEX_BIFScanner_INPUT}
-   ${BISON_BIFParser_OUTPUTS}
-   ${FLEX_BIFScanner_OUTPUTS}
-   bif_arg.cc
-   module_util.cc
-   bif_arg.h
-   module_util.h
-)
-
-add_executable(bifcl ${bifcl_SRCS})
-
-target_link_libraries(bifcl)
+set_property(SOURCE scan.cc APPEND_STRING PROPERTY COMPILE_FLAGS "-Wno-sign-compare")
 
 ########################################################################
 ## bifcl-dependent targets
@@ -117,13 +103,14 @@ target_link_libraries(bifcl)
 include(BifCl)
 
 set(BIF_SRCS
-    bro.bif
+    zeek.bif
     stats.bif
     event.bif
     const.bif
     types.bif
     strings.bif
     reporter.bif
+    option.bif
 )
 
 foreach (bift ${BIF_SRCS})
@@ -155,20 +142,13 @@ set(bro_SUBDIR_LIBS CACHE INTERNAL "subdir libraries" FORCE)
 set(bro_PLUGIN_LIBS CACHE INTERNAL "plugin libraries" FORCE)
 
 add_subdirectory(analyzer)
-add_subdirectory(broxygen)
+add_subdirectory(broker)
+add_subdirectory(zeekygen)
 add_subdirectory(file_analysis)
 add_subdirectory(input)
 add_subdirectory(iosource)
 add_subdirectory(logging)
 add_subdirectory(probabilistic)
-
-if ( ENABLE_BROKER )
-    add_subdirectory(broker)
-else ()
-    # Just to satisfy coverage unit tests until new Broker-based
-    # communication is enabled by default.
-    add_subdirectory(broker-dummy)
-endif ()
 
 set(bro_SUBDIRS
     # Order is important here.
@@ -240,23 +220,7 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/DebugCmdConstants.h
 set_source_files_properties(nb_dns.c PROPERTIES COMPILE_FLAGS
                             -fno-strict-aliasing)
 
-set(bro_SRCS
-    ${CMAKE_CURRENT_BINARY_DIR}/version.c
-    ${BIF_SRCS}
-    ${BINPAC_AUXSRC}
-    ${BINPAC_OUTPUTS}
-    ${TRANSFORMED_BISON_OUTPUTS}
-    ${FLEX_RuleScanner_OUTPUTS}
-    ${FLEX_RuleScanner_INPUT}
-    ${BISON_RuleParser_INPUT}
-    ${FLEX_REScanner_OUTPUTS}
-    ${FLEX_REScanner_INPUT}
-    ${BISON_REParser_INPUT}
-    ${FLEX_Scanner_OUTPUTS}
-    ${FLEX_Scanner_INPUT}
-    ${BISON_Parser_INPUT}
-    ${CMAKE_CURRENT_BINARY_DIR}/DebugCmdConstants.h
-    ${PLUGIN_INIT}
+set(MAIN_SRCS
     main.cc
     net_util.cc
     util.cc
@@ -267,7 +231,6 @@ set(bro_SRCS
     Brofiler.cc
     BroString.cc
     CCL.cc
-    ChunkedIO.cc
     CompHash.cc
     Conn.cc
     ConvertUTF.c
@@ -298,25 +261,20 @@ set(bro_SRCS
     IntSet.cc
     IP.cc
     IPAddr.cc
-    List.cc
     Reporter.cc
     NFA.cc
     Net.cc
     NetVar.cc
     Obj.cc
     OpaqueVal.cc
-    OSFinger.cc
     PacketFilter.cc
-    PersistenceSerializer.cc
     Pipe.cc
     PolicyFile.cc
     PrefixTable.cc
     PriorityQueue.cc
-    Queue.cc
     RandTest.cc
     RE.cc
     Reassem.cc
-    RemoteSerializer.cc
     Rule.cc
     RuleAction.cc
     RuleCondition.cc
@@ -324,10 +282,8 @@ set(bro_SRCS
     SmithWaterman.cc
     Scope.cc
     SerializationFormat.cc
-    SerialObj.cc
-    Serializer.cc
     Sessions.cc
-    StateAccess.cc
+    Notifier.cc
     Stats.cc
     Stmt.cc
     Tag.cc
@@ -339,6 +295,7 @@ set(bro_SRCS
     UID.cc
     Val.cc
     Var.cc
+    WeirdState.cc
     bsd-getopt-long.c
     bro_inet_ntop.c
     cq.c
@@ -357,8 +314,6 @@ set(bro_SRCS
     threading/formatters/Ascii.cc
     threading/formatters/JSON.cc
 
-    3rdparty/sqlite3.c
-
     plugin/Component.cc
     plugin/ComponentManager.h
     plugin/TaggedComponent.h
@@ -369,27 +324,61 @@ set(bro_SRCS
     digest.h
 )
 
+set(THIRD_PARTY_SRCS
+    3rdparty/sqlite3.c
+)
+
+set(bro_SRCS
+    ${CMAKE_CURRENT_BINARY_DIR}/version.c
+    ${BIF_SRCS}
+    ${BINPAC_AUXSRC}
+    ${BINPAC_OUTPUTS}
+    ${TRANSFORMED_BISON_OUTPUTS}
+    ${FLEX_RuleScanner_OUTPUTS}
+    ${FLEX_RuleScanner_INPUT}
+    ${BISON_RuleParser_INPUT}
+    ${FLEX_REScanner_OUTPUTS}
+    ${FLEX_REScanner_INPUT}
+    ${BISON_REParser_INPUT}
+    ${FLEX_Scanner_OUTPUTS}
+    ${FLEX_Scanner_INPUT}
+    ${BISON_Parser_INPUT}
+    ${CMAKE_CURRENT_BINARY_DIR}/DebugCmdConstants.h
+    ${PLUGIN_INIT}
+    ${THIRD_PARTY_SRCS}
+    ${MAIN_SRCS}
+)
+
 collect_headers(bro_HEADERS ${bro_SRCS})
 
 if ( bro_HAVE_OBJECT_LIBRARIES )
-    add_executable(bro ${bro_SRCS} ${bro_HEADERS} ${bro_SUBDIRS})
-    target_link_libraries(bro ${brodeps} ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
+    add_executable(zeek ${bro_SRCS} ${bro_HEADERS} ${bro_SUBDIRS})
+    target_link_libraries(zeek ${zeekdeps} ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
 else ()
-    add_executable(bro ${bro_SRCS} ${bro_HEADERS})
-    target_link_libraries(bro ${bro_SUBDIRS} ${brodeps} ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
+    add_executable(zeek ${bro_SRCS} ${bro_HEADERS})
+    target_link_libraries(zeek ${bro_SUBDIRS} ${zeekdeps} ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
 endif ()
 
 if ( NOT "${bro_LINKER_FLAGS}" STREQUAL "" )
-    set_target_properties(bro PROPERTIES LINK_FLAGS "${bro_LINKER_FLAGS}")
+    set_target_properties(zeek PROPERTIES LINK_FLAGS "${bro_LINKER_FLAGS}")
 endif ()
 
-install(TARGETS bro DESTINATION bin)
+install(TARGETS zeek DESTINATION bin)
 
-set(BRO_EXE bro
-    CACHE STRING "Bro executable binary" FORCE)
+# Install wrapper script for Bro-to-Zeek renaming.
+include(InstallSymlink)
+InstallSymlink("${CMAKE_INSTALL_PREFIX}/bin/zeek-wrapper" "${CMAKE_INSTALL_PREFIX}/bin/bro")
 
-set(BRO_EXE_PATH ${CMAKE_CURRENT_BINARY_DIR}/bro
-    CACHE STRING "Path to Bro executable binary" FORCE)
+set(BRO_EXE zeek
+    CACHE STRING "Zeek executable binary" FORCE)
+
+set(BRO_EXE_PATH ${CMAKE_CURRENT_BINARY_DIR}/zeek
+    CACHE STRING "Path to Zeek executable binary" FORCE)
+
+# Older plugins may still use `bro` in unit tests.
+execute_process(COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                "${CMAKE_CURRENT_BINARY_DIR}/../zeek-wrapper.in"
+                "${CMAKE_CURRENT_BINARY_DIR}/bro")
 
 # Target to create all the autogenerated files.
 add_custom_target(generate_outputs_stage1)
@@ -405,18 +394,18 @@ add_dependencies(generate_outputs_stage2b generate_outputs_stage1)
 add_custom_target(generate_outputs)
 add_dependencies(generate_outputs generate_outputs_stage2a generate_outputs_stage2b)
 
-# Build __load__.bro files for standard *.bif.bro.
+# Build __load__.zeek files for standard *.bif.zeek.
 bro_bif_create_loader(bif_loader "${bro_BASE_BIF_SCRIPTS}")
 add_dependencies(bif_loader ${bro_SUBDIRS})
-add_dependencies(bro bif_loader)
+add_dependencies(zeek bif_loader)
 
-# Build __load__.bro files for plugins/*.bif.bro.
+# Build __load__.zeek files for plugins/*.bif.zeek.
 bro_bif_create_loader(bif_loader_plugins "${bro_PLUGIN_BIF_SCRIPTS}")
 add_dependencies(bif_loader_plugins ${bro_SUBDIRS})
-add_dependencies(bro bif_loader_plugins)
+add_dependencies(zeek bif_loader_plugins)
 
-# Install *.bif.bro.
-install(DIRECTORY ${CMAKE_BINARY_DIR}/scripts/base/bif DESTINATION ${BRO_SCRIPT_INSTALL_PATH}/base)
+# Install *.bif.zeek.
+install(DIRECTORY ${CMAKE_BINARY_DIR}/scripts/base/bif DESTINATION ${ZEEK_SCRIPT_INSTALL_PATH}/base)
 
 # Create plugin directory at install time.
 install(DIRECTORY DESTINATION ${BRO_PLUGIN_INSTALL_PATH})
@@ -428,8 +417,39 @@ set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES ${CMAKE_BINARY_D
 # place, yet make confuse us now. This makes upgrading easier.
 install(CODE "
    file(REMOVE_RECURSE
-       ${BRO_SCRIPT_INSTALL_PATH}/base/frameworks/logging/writers/dataseries.bro
-       ${BRO_SCRIPT_INSTALL_PATH}/base/frameworks/logging/writers/elasticsearch.bro
-       ${BRO_SCRIPT_INSTALL_PATH}/policy/tuning/logs-to-elasticsearch.bro
+       ${ZEEK_SCRIPT_INSTALL_PATH}/base/frameworks/logging/writers/dataseries.bro
+       ${ZEEK_SCRIPT_INSTALL_PATH}/base/frameworks/logging/writers/elasticsearch.bro
+       ${ZEEK_SCRIPT_INSTALL_PATH}/policy/tuning/logs-to-elasticsearch.bro
    )
 ")
+
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
+        DESTINATION include/zeek
+        FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.pac"
+        PATTERN "3rdparty/*" EXCLUDE
+)
+
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/
+        DESTINATION include/zeek
+        FILES_MATCHING
+        PATTERN "*.bif.func_h"
+        PATTERN "*.bif.netvar_h"
+        PATTERN "*.bif.h"
+        PATTERN "CMakeFiles" EXCLUDE
+)
+
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/sqlite3.h
+        DESTINATION include/zeek/3rdparty
+)
+
+########################################################################
+## Clang-tidy target now that we have all of the sources
+
+add_clang_tidy_files(${MAIN_SRCS})
+
+# At this point we have included all of the cc files in src, all of the BinPAC
+# (*.pac.cc) files, and most of the generated code for BIFs (not including
+# *.bif.register.cc)
+create_clang_tidy_target()

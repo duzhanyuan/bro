@@ -6,16 +6,16 @@
 #include "SQLite.h"
 
 namespace plugin {
-namespace Bro_SQLiteWriter {
+namespace Zeek_SQLiteWriter {
 
 class Plugin : public plugin::Plugin {
 public:
-	plugin::Configuration Configure()
+	plugin::Configuration Configure() override
 		{
 		AddComponent(new ::logging::Component("SQLite", ::logging::writer::SQLite::Instantiate));
 
 		plugin::Configuration config;
-		config.name = "Bro::SQLiteWriter";
+		config.name = "Zeek::SQLiteWriter";
 		config.description = "SQLite log writer";
 		return config;
 		}

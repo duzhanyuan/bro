@@ -1,11 +1,11 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "util.h"
 #include "Timer.h"
 #include "Desc.h"
-#include "Serializer.h"
+#include "broker/Manager.h"
 
 // Names of timers in same order than in TimerType.
 const char* TimerNames[] = {
@@ -17,12 +17,12 @@ const char* TimerNames[] = {
 	"ConnectionStatusUpdateTimer",
 	"DNSExpireTimer",
 	"FileAnalysisInactivityTimer",
+	"FlowWeirdTimer",
 	"FragTimer",
-	"IncrementalSendTimer",
-	"IncrementalWriteTimer",
 	"InterconnTimer",
 	"IPTunnelInactivityTimer",
 	"NetbiosExpireTimer",
+	"NetWeirdTimer",
 	"NetworkTimer",
 	"NTPExpireTimer",
 	"ProfileTimer",
@@ -52,41 +52,6 @@ void Timer::Describe(ODesc* d) const
 	d->Add(Time());
 	}
 
-bool Timer::Serialize(SerialInfo* info) const
-	{
-	return SerialObj::Serialize(info);
-	}
-
-Timer* Timer::Unserialize(UnserialInfo* info)
-	{
-	Timer* timer = (Timer*) SerialObj::Unserialize(info, SER_TIMER);
-	if ( ! timer )
-		return 0;
-
-	timer_mgr->Add(timer);
-
-	return timer;
-	}
-
-bool Timer::DoSerialize(SerialInfo* info) const
-	{
-	DO_SERIALIZE(SER_TIMER, SerialObj);
-	char tmp = type;
-	return SERIALIZE(tmp) && SERIALIZE(time);
-	}
-
-bool Timer::DoUnserialize(UnserialInfo* info)
-	{
-	DO_UNSERIALIZE(SerialObj);
-
-	char tmp;
-	if ( ! UNSERIALIZE(&tmp) )
-		return false;
-	type = tmp;
-
-	return UNSERIALIZE(&time);
-	}
-
 unsigned int TimerMgr::current_timers[NUM_TIMER_TYPES];
 
 TimerMgr::~TimerMgr()
@@ -103,6 +68,7 @@ int TimerMgr::Advance(double arg_t, int max_expire)
 	last_timestamp = 0;
 	num_expired = 0;
 	last_advance = timer_mgr->Time();
+	broker_mgr->AdvanceTime(arg_t);
 
 	return DoAdvance(t, max_expire);
 	}

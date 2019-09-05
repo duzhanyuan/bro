@@ -10,10 +10,10 @@ namespace analyzer { namespace ftp {
 
 class FTP_Analyzer : public tcp::TCP_ApplicationAnalyzer {
 public:
-	FTP_Analyzer(Connection* conn);
+	explicit FTP_Analyzer(Connection* conn);
 
-	virtual void Done();
-	virtual void DeliverStream(int len, const u_char* data, bool orig);
+	void Done() override;
+	void DeliverStream(int len, const u_char* data, bool orig) override;
 
 	static analyzer::Analyzer* Instantiate(Connection* conn)
 		{
@@ -23,7 +23,7 @@ public:
 protected:
 	login::NVT_Analyzer* nvt_orig;
 	login::NVT_Analyzer* nvt_resp;
-	uint32 pending_reply;	// code associated with multi-line reply, or 0
+	uint32_t pending_reply;	// code associated with multi-line reply, or 0
 	string auth_requested;	// AUTH method requested
 };
 
@@ -40,7 +40,7 @@ public:
 	    : SupportAnalyzer("FTP_ADAT", conn, arg_orig),
 	      first_token(true) { }
 
-	void DeliverStream(int len, const u_char* data, bool orig);
+	void DeliverStream(int len, const u_char* data, bool orig) override;
 
 protected:
 	// Used by the client-side analyzer to tell if it needs to peek at the

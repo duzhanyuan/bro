@@ -17,13 +17,12 @@ class DFA_State;
 
 class DFA_Machine;
 class DFA_State;
-struct CacheEntry;
 
 class DFA_State : public BroObj {
 public:
 	DFA_State(int state_num, const EquivClass* ec,
 			NFA_state_list* nfa_states, AcceptingSet* accept);
-	~DFA_State();
+	~DFA_State() override;
 
 	int StateNum() const		{ return state_num; }
 	int NFAStateNum() const		{ return nfa_states->length(); }
@@ -44,7 +43,7 @@ public:
 	// Returns the equivalence classes of ec's corresponding to this state.
 	const EquivClass* MetaECs() const	{ return meta_ec; }
 
-	void Describe(ODesc* d) const;
+	void Describe(ODesc* d) const override;
 	void Dump(FILE* f, DFA_Machine* m);
 	void Stats(unsigned int* computed, unsigned int* uncomputed);
 	unsigned int Size();
@@ -64,15 +63,11 @@ protected:
 	NFA_state_list* nfa_states;
 	EquivClass* meta_ec;	// which ec's make same transition
 	DFA_State* mark;
-	CacheEntry* centry;
 
 	static unsigned int transition_counter;	// see Xtion()
 };
 
-struct CacheEntry {
-	DFA_State* state;
-	HashKey* hash;
-};
+using DigestStr = basic_string<u_char>;
 
 class DFA_State_Cache {
 public:
@@ -80,13 +75,12 @@ public:
 	~DFA_State_Cache();
 
 	// If the caller stores the handle, it has to call Ref() on it.
-	DFA_State* Lookup(const NFA_state_list& nfa_states,
-					HashKey** hash);
+	DFA_State* Lookup(const NFA_state_list& nfa_states, DigestStr* digest);
 
-	// Takes ownership of both; hash is the one returned by Lookup().
-	DFA_State* Insert(DFA_State* state, HashKey* hash);
+	// Takes ownership of state; digest is the one returned by Lookup().
+	DFA_State* Insert(DFA_State* state, DigestStr digest);
 
-	int NumEntries() const	{ return states.Length(); }
+	int NumEntries() const	{ return states.size(); }
 
 	struct Stats {
 		// Sum of all NFA states
@@ -105,21 +99,14 @@ private:
 	int hits;	// Statistics
 	int misses;
 
-	declare(PDict,CacheEntry);
-
 	// Hash indexed by NFA states (MD5s of them, actually).
-	PDict(CacheEntry) states;
+	std::map<DigestStr, DFA_State*> states;
 };
-
-declare(PList,DFA_State);
-typedef PList(DFA_State) DFA_state_list;
 
 class DFA_Machine : public BroObj {
 public:
 	DFA_Machine(NFA_Machine* n, EquivClass* ec);
-	DFA_Machine(int** xtion_ptrs, int num_states, int num_ecs,
-			int* acc_array);
-	~DFA_Machine();
+	~DFA_Machine() override;
 
 	DFA_State* StartState() const	{ return start_state; }
 
@@ -129,7 +116,7 @@ public:
 
 	int Rep(int sym);
 
-	void Describe(ODesc* d) const;
+	void Describe(ODesc* d) const override;
 	void Dump(FILE* f);
 
 	unsigned int MemoryAllocation() const;
@@ -141,7 +128,7 @@ protected:
 	int state_count;
 
 	// The state list has to be sorted according to IDs.
-	int StateSetToDFA_State(NFA_state_list* state_set, DFA_State*& d,
+	bool StateSetToDFA_State(NFA_state_list* state_set, DFA_State*& d,
 				const EquivClass* ec);
 	const EquivClass* EC() const	{ return ec; }
 

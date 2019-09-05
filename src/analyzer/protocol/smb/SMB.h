@@ -8,12 +8,12 @@ namespace analyzer { namespace smb {
 
 class SMB_Analyzer : public tcp::TCP_ApplicationAnalyzer {
 public:
-	SMB_Analyzer(Connection* conn);
-	virtual ~SMB_Analyzer();
+	explicit SMB_Analyzer(Connection* conn);
+	~SMB_Analyzer() override;
 
 	void Done() override;
 	void DeliverStream(int len, const u_char* data, bool orig) override;
-	void Undelivered(uint64 seq, int len, bool orig) override;
+	void Undelivered(uint64_t seq, int len, bool orig) override;
 	void EndpointEOF(bool is_orig) override;
 
 	bool HasSMBHeader(int len, const u_char* data);
@@ -27,7 +27,7 @@ protected:
 
 	// Count the number of chunks received by the analyzer
 	// but only used to count the first few.
-	uint8 chunks;
+	uint8_t chunks;
 
 	bool need_sync;
 };

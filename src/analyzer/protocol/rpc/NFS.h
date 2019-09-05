@@ -11,21 +11,21 @@ namespace analyzer { namespace rpc {
 
 class NFS_Interp : public RPC_Interpreter {
 public:
-	NFS_Interp(analyzer::Analyzer* arg_analyzer) : RPC_Interpreter(arg_analyzer) { }
+	explicit NFS_Interp(analyzer::Analyzer* arg_analyzer) : RPC_Interpreter(arg_analyzer) { }
 
 protected:
-	int RPC_BuildCall(RPC_CallInfo* c, const u_char*& buf, int& n);
+	int RPC_BuildCall(RPC_CallInfo* c, const u_char*& buf, int& n) override;
 	int RPC_BuildReply(RPC_CallInfo* c, BifEnum::rpc_status rpc_status,
 				const u_char*& buf, int& n, double start_time,
-				double last_time, int reply_len);
+				double last_time, int reply_len) override;
 
 	// Returns a new val_list that already has a conn_val, rpc_status and
 	// nfs_status. These are the first parameters for each nfs_* event
 	// ...
-	val_list* event_common_vl(RPC_CallInfo *c, BifEnum::rpc_status rpc_status,
+	val_list event_common_vl(RPC_CallInfo *c, BifEnum::rpc_status rpc_status,
 				BifEnum::NFS3::status_t nfs_status,
 				double rep_start_time, double rep_last_time,
-				int reply_len);
+				int reply_len, int extra_elements);
 
 	// These methods parse the appropriate NFSv3 "type" out of buf. If
 	// there are any errors (i.e., buffer to short, etc), buf will be set
@@ -34,11 +34,17 @@ protected:
 	// are based on the type names of RFC 1813.
 	StringVal* nfs3_fh(const u_char*& buf, int& n);
 	RecordVal* nfs3_fattr(const u_char*& buf, int& n);
+	RecordVal* nfs3_sattr(const u_char*& buf, int& n);
 	EnumVal* nfs3_ftype(const u_char*& buf, int& n);
+	EnumVal* nfs3_time_how(const u_char*& buf, int& n);
 	RecordVal* nfs3_wcc_attr(const u_char*& buf, int& n);
 	RecordVal* nfs3_diropargs(const u_char*&buf, int &n);
+	RecordVal* nfs3_symlinkdata(const u_char*& buf, int& n);
 	RecordVal* nfs3_renameopargs(const u_char*&buf, int &n);
 	StringVal* nfs3_filename(const u_char*& buf, int& n);
+	RecordVal* nfs3_linkargs(const u_char*& buf, int& n);
+	RecordVal* nfs3_symlinkargs(const u_char*& buf, int& n);
+	RecordVal* nfs3_sattrargs(const u_char*& buf, int& n);
 	StringVal* nfs3_nfspath(const u_char*& buf, int& n)
 		{
 		return nfs3_filename(buf,n);
@@ -46,10 +52,12 @@ protected:
 
 	RecordVal* nfs3_post_op_attr(const u_char*&buf, int &n);	// Return 0 or an fattr
 	RecordVal* nfs3_pre_op_attr(const u_char*&buf, int &n);	// Return 0 or an wcc_attr
+	RecordVal* nfs3_sattr_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status);
 	RecordVal* nfs3_lookup_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status);
 	RecordVal* nfs3_readargs(const u_char*& buf, int& n);
 	RecordVal* nfs3_read_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status, bro_uint_t offset);
 	RecordVal* nfs3_readlink_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status);
+	RecordVal* nfs3_link_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status);
 	RecordVal* nfs3_writeargs(const u_char*& buf, int& n);
 	EnumVal* nfs3_stable_how(const u_char*& buf, int& n);
 	RecordVal* nfs3_write_reply(const u_char*& buf, int& n, BifEnum::NFS3::status_t status);
@@ -66,7 +74,6 @@ protected:
 	//   * size is the amount of bytes read (or requested to be written),
 	StringVal* nfs3_file_data(const u_char*& buf, int& n, uint64_t offset, int size);
 
-	RecordVal* ExtractOptAttrs(const u_char*& buf, int& n);
 	Val* ExtractUint32(const u_char*& buf, int& n);
 	Val* ExtractUint64(const u_char*& buf, int& n);
 	Val* ExtractTime(const u_char*& buf, int& n);
@@ -76,8 +83,8 @@ protected:
 
 class NFS_Analyzer : public RPC_Analyzer {
 public:
-	NFS_Analyzer(Connection* conn);
-	virtual void Init();
+	explicit NFS_Analyzer(Connection* conn);
+	void Init() override;
 
 	static analyzer::Analyzer* Instantiate(Connection* conn)
 		{ return new NFS_Analyzer(conn); }

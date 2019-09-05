@@ -208,6 +208,16 @@ void HookArgument::Describe(ODesc* d) const
 		d->Add("}");
 		}
 		break;
+
+	case LOCATION:
+		if ( arg.loc )
+			{
+			arg.loc->Describe(d);
+			}
+		else
+		 {
+			d->Add("<no location>");
+		 }
 	}
 	}
 
@@ -240,11 +250,6 @@ const std::string& Plugin::Description() const
 VersionNumber Plugin::Version() const
 	{
 	return config.version;
-	}
-
-int Plugin::APIVersion() const
-	{
-	return config.api_version;
 	}
 
 bool Plugin::DynamicPlugin() const
@@ -350,7 +355,7 @@ void Plugin::RequestBroObjDtor(BroObj* obj)
 	plugin_mgr->RequestBroObjDtor(obj, this);
 	}
 
-int Plugin::HookLoadFile(const std::string& file, const std::string& ext)
+int Plugin::HookLoadFile(const LoadType type, const std::string& file, const std::string& resolved)
 	{
 	return -1;
 	}
@@ -398,6 +403,14 @@ bool Plugin::HookLogWrite(const std::string& writer, const std::string& filter,
 	return true;
 	}
 
+bool Plugin::HookReporter(const std::string& prefix, const EventHandlerPtr event,
+			  const Connection* conn, const val_list* addl, bool location,
+			  const Location* location1, const Location* location2,
+			  bool time, const std::string& message)
+	{
+	return true;
+	}
+
 void Plugin::MetaHookPre(HookType hook, const HookArgumentList& args)
 	{
 	}
@@ -432,6 +445,8 @@ void Plugin::Describe(ODesc* d) const
 			d->Add(config.version.major);
 			d->Add(".");
 			d->Add(config.version.minor);
+			d->Add(".");
+			d->Add(config.version.patch);
 			d->Add(")");
 			}
 		else

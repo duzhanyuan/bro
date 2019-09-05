@@ -4,47 +4,39 @@
 #define EVENTHANDLER
 
 #include <assert.h>
-#include <map>
+#include <unordered_set>
 #include <string>
 #include "List.h"
 #include "BroList.h"
 
 class Func;
 class FuncType;
-class Serializer;
-class SerialInfo;
-class UnserialInfo;
 
 class EventHandler {
 public:
-	EventHandler(const char* name);
+	explicit EventHandler(const char* name);
 	~EventHandler();
 
 	const char* Name()	{ return name; }
 	Func* LocalHandler()	{ return local; }
-	FuncType* FType();
+	FuncType* FType(bool check_export = true);
 
 	void SetLocalHandler(Func* f);
 
-	void AddRemoteHandler(SourceID peer);
-	void RemoveRemoteHandler(SourceID peer);
-
-#ifdef ENABLE_BROKER
-	void AutoRemote(std::string topic, int flags)
+	void AutoPublish(std::string topic)
 		{
-		auto_remote_send[std::move(topic)] = flags;
+		auto_publish.insert(std::move(topic));
 		}
 
-	void AutoRemoteStop(const std::string& topic)
+	void AutoUnpublish(const std::string& topic)
 		{
-		auto_remote_send.erase(topic);
+		auto_publish.erase(topic);
 		}
-#endif
 
 	void Call(val_list* vl, bool no_remote = false);
 
 	// Returns true if there is at least one local or remote handler.
-	operator  bool() const;
+	explicit operator  bool() const;
 
 	void SetUsed()	{ used = true; }
 	bool Used()	{ return used; }
@@ -61,11 +53,6 @@ public:
 	void SetGenerateAlways()	{ generate_always = true; }
 	bool GenerateAlways()	{ return generate_always; }
 
-	// We don't serialize the handler(s) itself here, but
-	// just the reference to it.
-	bool Serialize(SerialInfo* info) const;
-	static EventHandler* Unserialize(UnserialInfo* info);
-
 private:
 	void NewEvent(val_list* vl);	// Raise new_event() meta event.
 
@@ -77,13 +64,7 @@ private:
 	bool error_handler;	// this handler reports error messages.
 	bool generate_always;
 
-	declare(List, SourceID);
-	typedef List(SourceID) receiver_list;
-	receiver_list receivers;
-
-#ifdef ENABLE_BROKER
-	std::map<std::string, int> auto_remote_send;	// topic -> flags
-#endif
+	std::unordered_set<std::string> auto_publish;
 };
 
 // Encapsulates a ptr to an event handler to overload the boolean operator.
@@ -102,7 +83,7 @@ public:
 
 	EventHandler* Ptr()	{ return handler; }
 
-	operator bool() const	{ return handler && *handler; }
+	explicit operator bool() const	{ return handler && *handler; }
 	EventHandler* operator->()	{ return handler; }
 	const EventHandler* operator->() const	{ return handler; }
 

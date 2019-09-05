@@ -10,8 +10,6 @@
 #include "Dict.h"
 #include "Packet.h"
 
-declare(PDict,BPF_Program);
-
 namespace iosource {
 
 /**
@@ -28,23 +26,23 @@ public:
 		/**
 		 * Packets received by source after filtering (w/o drops).
 		 */
-		unsigned int received;
+		uint64_t received;
 
 		/**
 		 * Packets dropped by source.
 		 */
-		unsigned int dropped;	// pkts dropped
+		uint64_t dropped;	// pkts dropped
 
 		/**
 		 * Total number of packets on link before filtering.
 		 * Optional, can be left unset if not available.
 		 */
-		unsigned int link;
+		uint64_t link;
 
 		/**
 		  * Bytes received by source after filtering (w/o drops).
 		*/
-		uint64 bytes_received;
+		uint64_t bytes_received;
 
 		Stats()	{ received = dropped = link = bytes_received = 0; }
 	};
@@ -57,7 +55,7 @@ public:
 	/**
 	 * Destructor.
 	 */
-	virtual ~PktSrc();
+	~PktSrc() override;
 
 	/**
 	 * Returns the path associated with the source. This is the interface
@@ -79,7 +77,7 @@ public:
 	 * Returns the netmask associated with the source, or \c
 	 * NETMASK_UNKNOWN if unknown.
 	 */
-	uint32 Netmask() const;
+	uint32_t Netmask() const;
 
 	/**
 	 * Returns true if the source has flagged an error.
@@ -91,11 +89,6 @@ public:
 	 * message. Returns an empty string otherwise.
 	 */
 	const char* ErrorMsg() const;
-
-	/**
-	 * Returns the size of the link-layer header for this source.
-	 */
-	int HdrSize() const;
 
 	/**
 	 * In pseudo-realtime mode, returns the logical timestamp of the
@@ -243,7 +236,7 @@ protected:
 		 * Returns the netmask associated with the source, or \c
 		 * NETMASK_UNKNOWN if unknown.
 		 */
-		uint32 netmask;
+		uint32_t netmask;
 
 		/**
 		 * True if the source is reading live inout, false for
@@ -350,13 +343,13 @@ private:
 	bool ExtractNextPacketInternal();
 
 	// IOSource interface implementation.
-	virtual void Init();
-	virtual void Done();
-	virtual void GetFds(iosource::FD_Set* read, iosource::FD_Set* write,
-	                    iosource::FD_Set* except);
-	virtual double NextTimestamp(double* local_network_time);
-	virtual void Process();
-	virtual const char* Tag();
+	void Init() override;
+	void Done() override;
+	void GetFds(iosource::FD_Set* read, iosource::FD_Set* write,
+	                    iosource::FD_Set* except) override;
+	double NextTimestamp(double* local_network_time) override;
+	void Process() override;
+	const char* Tag() override;
 
 	Properties props;
 

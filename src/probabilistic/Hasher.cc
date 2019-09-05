@@ -1,11 +1,10 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
 #include <typeinfo>
-#include <openssl/md5.h>
+#include <openssl/evp.h>
 
 #include "Hasher.h"
 #include "NetVar.h"
-#include "Serializer.h"
 #include "digest.h"
 #include "siphash24.h"
 
@@ -15,24 +14,23 @@ Hasher::seed_t Hasher::MakeSeed(const void* data, size_t size)
 	{
 	u_char buf[SHA256_DIGEST_LENGTH];
 	seed_t tmpseed;
-	SHA256_CTX ctx;
-	sha256_init(&ctx);
+	EVP_MD_CTX* ctx = hash_init(Hash_SHA256);
 
 	assert(sizeof(tmpseed) == 16);
 
 	if ( data )
-		sha256_update(&ctx, data, size);
+		hash_update(ctx, data, size);
 
 	else if ( global_hash_seed && global_hash_seed->Len() > 0 )
-		sha256_update(&ctx, global_hash_seed->Bytes(), global_hash_seed->Len());
+		hash_update(ctx, global_hash_seed->Bytes(), global_hash_seed->Len());
 
 	else
 		{
 		unsigned int first_seed = initial_seed();
-		sha256_update(&ctx, &first_seed, sizeof(first_seed));
+		hash_update(ctx, &first_seed, sizeof(first_seed));
 		}
 
-	sha256_final(&ctx, buf);
+	hash_final(ctx, buf);
 	memcpy(&tmpseed, buf, sizeof(tmpseed)); // Use the first bytes as seed.
 	return tmpseed;
 	}
@@ -42,56 +40,51 @@ Hasher::digest_vector Hasher::Hash(const HashKey* key) const
 	return Hash(key->Key(), key->Size());
 	}
 
-bool Hasher::Serialize(SerialInfo* info) const
-	{
-	return SerialObj::Serialize(info);
-	}
-
-Hasher* Hasher::Unserialize(UnserialInfo* info)
-	{
-	return reinterpret_cast<Hasher*>(SerialObj::Unserialize(info, SER_HASHER));
-	}
-
-bool Hasher::DoSerialize(SerialInfo* info) const
-	{
-	DO_SERIALIZE(SER_HASHER, SerialObj);
-
-	if ( ! SERIALIZE(static_cast<uint16>(k)) )
-		return false;
-
-	if ( ! SERIALIZE(static_cast<uint64>(seed.h1)) )
-		return false;
-
-	return SERIALIZE(static_cast<uint64>(seed.h2));
-	}
-
-bool Hasher::DoUnserialize(UnserialInfo* info)
-	{
-	DO_UNSERIALIZE(SerialObj);
-
-	uint16 serial_k;
-	if ( ! UNSERIALIZE(&serial_k) )
-		return false;
-
-	k = serial_k;
-	assert(k > 0);
-
-	seed_t serial_seed;
-	if ( ! UNSERIALIZE(&serial_seed.h1) )
-		return false;
-
-	if ( ! UNSERIALIZE(&serial_seed.h2) )
-		return false;
-
-	seed = serial_seed;
-
-	return true;
-	}
-
 Hasher::Hasher(size_t arg_k, seed_t arg_seed)
 	{
 	k = arg_k;
 	seed = arg_seed;
+	}
+
+broker::expected<broker::data> Hasher::Serialize() const
+	{
+	return {broker::vector{
+		static_cast<uint64_t>(Type()), static_cast<uint64_t>(k),
+		seed.h1, seed.h2 }};
+	}
+
+std::unique_ptr<Hasher> Hasher::Unserialize(const broker::data& data)
+	{
+	auto v = caf::get_if<broker::vector>(&data);
+
+	if ( ! (v && v->size() == 4) )
+		return nullptr;
+
+	auto type = caf::get_if<uint64_t>(&(*v)[0]);
+	auto k = caf::get_if<uint64_t>(&(*v)[1]);
+	auto h1 = caf::get_if<uint64_t>(&(*v)[2]);
+	auto h2 = caf::get_if<uint64_t>(&(*v)[3]);
+
+	if ( ! (type && k && h1 && h2) )
+		return nullptr;
+
+	std::unique_ptr<Hasher> hasher;
+
+	switch ( *type ) {
+	case Default:
+		hasher = std::unique_ptr<Hasher>(new DefaultHasher(*k, {*h1, *h2}));
+		break;
+
+	case Double:
+		hasher = std::unique_ptr<Hasher>(new DoubleHasher(*k, {*h1, *h2}));
+		break;
+	}
+
+	// Note that the derived classed don't hold any further state of
+	// their own. They reconstruct all their information from their
+	// constructors' arguments.
+
+	return hasher;
 	}
 
 UHF::UHF()
@@ -118,16 +111,19 @@ Hasher::digest UHF::hash(const void* x, size_t n) const
 		return outdigest;
 		}
 
-	unsigned char d[16];
-	MD5(reinterpret_cast<const unsigned char*>(x), n, d);
+	union {
+		unsigned char d[16];
+		Hasher::digest rval;
+	} u;
+
+	internal_md5(reinterpret_cast<const unsigned char*>(x), n, u.d);
 
 	const unsigned char* s = reinterpret_cast<const unsigned char*>(&seed);
 	for ( size_t i = 0; i < 16; ++i )
-		d[i] ^= s[i % sizeof(seed)];
+		u.d[i] ^= s[i % sizeof(seed)];
 
-	MD5(d, 16, d);
-
-	return *reinterpret_cast<const Hasher::digest*>(d);
+	internal_md5(u.d, 16, u.d);
+	return u.rval;
 	}
 
 DefaultHasher::DefaultHasher(size_t k, Hasher::seed_t seed)
@@ -165,31 +161,6 @@ bool DefaultHasher::Equals(const Hasher* other) const
 	return hash_functions == o->hash_functions;
 	}
 
-IMPLEMENT_SERIAL(DefaultHasher, SER_DEFAULTHASHER)
-
-bool DefaultHasher::DoSerialize(SerialInfo* info) const
-	{
-	DO_SERIALIZE(SER_DEFAULTHASHER, Hasher);
-
-	// Nothing to do here, the base class has all we need serialized already.
-	return true;
-	}
-
-bool DefaultHasher::DoUnserialize(UnserialInfo* info)
-	{
-	DO_UNSERIALIZE(Hasher);
-
-	hash_functions.clear();
-	for ( size_t i = 0; i < K(); ++i )
-		{
-		Hasher::seed_t s = Seed();
-		s.h1 += bro_prng(i);
-		hash_functions.push_back(UHF(s));
-		}
-
-	return true;
-	}
-
 DoubleHasher::DoubleHasher(size_t k, seed_t seed)
 	: Hasher(k, seed), h1(seed + bro_prng(1)), h2(seed + bro_prng(2))
 	{
@@ -221,22 +192,3 @@ bool DoubleHasher::Equals(const Hasher* other) const
 	return h1 == o->h1 && h2 == o->h2;
 	}
 
-IMPLEMENT_SERIAL(DoubleHasher, SER_DOUBLEHASHER)
-
-bool DoubleHasher::DoSerialize(SerialInfo* info) const
-	{
-	DO_SERIALIZE(SER_DOUBLEHASHER, Hasher);
-
-	// Nothing to do here, the base class has all we need serialized already.
-	return true;
-	}
-
-bool DoubleHasher::DoUnserialize(UnserialInfo* info)
-	{
-	DO_UNSERIALIZE(Hasher);
-
-	h1 = UHF(Seed() + bro_prng(1));
-	h2 = UHF(Seed() + bro_prng(2));
-
-	return true;
-	}

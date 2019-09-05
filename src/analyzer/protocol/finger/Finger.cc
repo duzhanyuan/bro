@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <ctype.h>
 
@@ -17,9 +17,9 @@ Finger_Analyzer::Finger_Analyzer(Connection* conn)
 : tcp::TCP_ApplicationAnalyzer("FINGER", conn)
 	{
 	did_deliver = 0;
-	content_line_orig = new tcp::ContentLine_Analyzer(conn, true);
+	content_line_orig = new tcp::ContentLine_Analyzer(conn, true, 1000);
 	content_line_orig->SetIsNULSensitive(true);
-	content_line_resp = new tcp::ContentLine_Analyzer(conn, false);
+	content_line_resp = new tcp::ContentLine_Analyzer(conn, false, 1000);
 	AddSupportAnalyzer(content_line_orig);
 	AddSupportAnalyzer(content_line_resp);
 	}
@@ -40,6 +40,9 @@ void Finger_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig
 	{
 	const char* line = (const char*) data;
 	const char* end_of_line = line + length;
+
+	if ( length == 0 )
+		return;
 
 	if ( is_orig )
 		{
@@ -63,14 +66,15 @@ void Finger_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig
 		else
 			host = at + 1;
 
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(new Val(long_cnt, TYPE_BOOL));
-		vl->append(new StringVal(at - line, line));
-		vl->append(new StringVal(end_of_line - host, host));
-
 		if ( finger_request )
-			ConnectionEvent(finger_request, vl);
+			{
+			ConnectionEventFast(finger_request, {
+				BuildConnVal(),
+				val_mgr->GetBool(long_cnt),
+				new StringVal(at - line, line),
+				new StringVal(end_of_line - host, host),
+			});
+			}
 
 		Conn()->Match(Rule::FINGER, (const u_char *) line,
 			  end_of_line - line, true, true, 1, true);
@@ -83,10 +87,9 @@ void Finger_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig
 		if ( ! finger_reply )
 			return;
 
-		val_list* vl = new val_list;
-		vl->append(BuildConnVal());
-		vl->append(new StringVal(end_of_line - line, line));
-
-		ConnectionEvent(finger_reply, vl);
+		ConnectionEventFast(finger_reply, {
+			BuildConnVal(),
+			new StringVal(end_of_line - line, line),
+		});
 		}
 	}

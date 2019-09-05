@@ -1,4 +1,4 @@
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include "NetVar.h"
 #include "MIME.h"
@@ -146,9 +146,14 @@ void MIME_Mail::Undelivered(int len)
 	                              is_orig, cur_entity_id);
 	}
 
-int strcasecmp_n(data_chunk_t s, const char* t)
+bool istrequal(data_chunk_t s, const char* t)
 	{
-	return strncasecmp(s.data, t, s.length);
+	int len = strlen(t);
+
+	if ( s.length != len )
+		return false;
+
+	return strncasecmp(s.data, t, len) == 0;
 	}
 
 int MIME_count_leading_lws(int len, const char* data)
@@ -532,6 +537,8 @@ MIME_Entity::MIME_Entity(MIME_Message* output_message, MIME_Entity* parent_entit
 	message = output_message;
 	if ( parent )
 		content_encoding = parent->ContentTransferEncoding();
+
+	want_all_headers = (bool)mime_all_headers;
 	}
 
 void MIME_Entity::init()
@@ -564,6 +571,7 @@ void MIME_Entity::init()
 
 	message = 0;
 	delay_adding_implicit_CRLF = false;
+	want_all_headers = false;
 	}
 
 MIME_Entity::~MIME_Entity()
@@ -739,7 +747,11 @@ void MIME_Entity::FinishHeader()
 		{
 		ParseMIMEHeader(h);
 		SubmitHeader(h);
-		headers.push_back(h);
+
+		if ( want_all_headers )
+			headers.push_back(h);
+		else
+			delete h;
 		}
 	else
 		delete h;
@@ -751,7 +763,7 @@ int MIME_Entity::LookupMIMEHeaderName(data_chunk_t name)
 	// header names are case-insensitive (RFC 822, 2822, 2045).
 
 	for ( int i = 0; MIMEHeaderName[i] != 0; ++i )
-		if ( strcasecmp_n(name, MIMEHeaderName[i]) == 0 )
+		if ( istrequal(name, MIMEHeaderName[i]) )
 			return i;
 	return -1;
 	}
@@ -876,12 +888,12 @@ int MIME_Entity::ParseFieldParameters(int len, const char* data)
 
 		if ( current_field_type == MIME_CONTENT_TYPE &&
 		     content_type == CONTENT_TYPE_MULTIPART &&
-		     strcasecmp_n(attr, "boundary") == 0 )
+		     istrequal(attr, "boundary") )
 			{
 			// token or quoted-string (and some lenience for characters
 			// not explicitly allowed by the RFC, but encountered in the wild)
 			offset = MIME_get_value(len, data, val, true);
-			
+
 			if ( ! val )
 				{
 				IllegalFormat("Could not parse multipart boundary");
@@ -915,13 +927,13 @@ void MIME_Entity::ParseContentType(data_chunk_t type, data_chunk_t sub_type)
 	{
 	int i;
 	for ( i = 0; MIMEContentTypeName[i]; ++i )
-		if ( strcasecmp_n(type, MIMEContentTypeName[i]) == 0 )
+		if ( istrequal(type, MIMEContentTypeName[i]) )
 			break;
 
 	content_type = i;
 
 	for ( i = 0; MIMEContentSubtypeName[i]; ++i )
-		if ( strcasecmp_n(sub_type, MIMEContentSubtypeName[i]) == 0 )
+		if ( istrequal(sub_type, MIMEContentSubtypeName[i]) )
 			break;
 
 	content_subtype = i;
@@ -942,8 +954,7 @@ void MIME_Entity::ParseContentEncoding(data_chunk_t encoding_mechanism)
 	{
 	int i;
 	for ( i = 0; MIMEContentEncodingName[i]; ++i )
-		if ( strcasecmp_n(encoding_mechanism,
-					MIMEContentEncodingName[i]) == 0 )
+		if ( istrequal(encoding_mechanism, MIMEContentEncodingName[i]) )
 			break;
 
 	content_encoding = i;
@@ -1292,7 +1303,7 @@ TableVal* MIME_Message::BuildHeaderTable(MIME_HeaderList& hlist)
 
 	for ( unsigned int i = 0; i < hlist.size(); ++i )
 		{
-		Val* index = new Val(i+1, TYPE_COUNT);	// index starting from 1
+		Val* index = val_mgr->GetCount(i+1);	// index starting from 1
 
 		MIME_Header* h = hlist[i];
 		RecordVal* header_record = BuildHeaderVal(h);
@@ -1306,7 +1317,7 @@ TableVal* MIME_Message::BuildHeaderTable(MIME_HeaderList& hlist)
 	}
 
 MIME_Mail::MIME_Mail(analyzer::Analyzer* mail_analyzer, bool orig, int buf_size)
-    : MIME_Message(mail_analyzer), md5_hash()
+: MIME_Message(mail_analyzer), md5_hash()
 	{
 	analyzer = mail_analyzer;
 
@@ -1331,7 +1342,7 @@ MIME_Mail::MIME_Mail(analyzer::Analyzer* mail_analyzer, bool orig, int buf_size)
 	if ( mime_content_hash )
 		{
 		compute_content_hash = 1;
-		md5_init(&md5_hash);
+		md5_hash = hash_init(Hash_MD5);
 		}
 	else
 		compute_content_hash = 0;
@@ -1351,13 +1362,14 @@ void MIME_Mail::Done()
 	if ( compute_content_hash && mime_content_hash )
 		{
 		u_char* digest = new u_char[16];
-		md5_final(&md5_hash, digest);
+		hash_final(md5_hash, digest);
+		md5_hash = nullptr;
 
-		val_list* vl = new val_list;
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(content_hash_length, TYPE_COUNT));
-		vl->append(new StringVal(new BroString(1, digest, 16)));
-		analyzer->ConnectionEvent(mime_content_hash, vl);
+		analyzer->ConnectionEventFast(mime_content_hash, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetCount(content_hash_length),
+			new StringVal(new BroString(1, digest, 16)),
+		});
 		}
 
 	MIME_Message::Done();
@@ -1367,6 +1379,9 @@ void MIME_Mail::Done()
 
 MIME_Mail::~MIME_Mail()
 	{
+	if ( md5_hash )
+		EVP_MD_CTX_free(md5_hash);
+
 	delete_strings(all_content);
 	delete data_buffer;
 	delete top_level;
@@ -1378,11 +1393,7 @@ void MIME_Mail::BeginEntity(MIME_Entity* /* entity */)
 	cur_entity_id.clear();
 
 	if ( mime_begin_entity )
-		{
-		val_list* vl = new val_list;
-		vl->append(analyzer->BuildConnVal());
-		analyzer->ConnectionEvent(mime_begin_entity, vl);
-		}
+		analyzer->ConnectionEventFast(mime_begin_entity, {analyzer->BuildConnVal()});
 
 	buffer_start = data_start = 0;
 	ASSERT(entity_content.size() == 0);
@@ -1394,12 +1405,11 @@ void MIME_Mail::EndEntity(MIME_Entity* /* entity */)
 		{
 		BroString* s = concatenate(entity_content);
 
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(s->Len(), TYPE_COUNT));
-		vl->append(new StringVal(s));
-
-		analyzer->ConnectionEvent(mime_entity_data, vl);
+		analyzer->ConnectionEventFast(mime_entity_data, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetCount(s->Len()),
+			new StringVal(s),
+		});
 
 		if ( ! mime_all_data )
 			delete_strings(entity_content);
@@ -1408,11 +1418,7 @@ void MIME_Mail::EndEntity(MIME_Entity* /* entity */)
 		}
 
 	if ( mime_end_entity )
-		{
-		val_list* vl = new val_list;
-		vl->append(analyzer->BuildConnVal());
-		analyzer->ConnectionEvent(mime_end_entity, vl);
-		}
+		analyzer->ConnectionEventFast(mime_end_entity, {analyzer->BuildConnVal()});
 
 	file_mgr->EndOfFile(analyzer->GetAnalyzerTag(), analyzer->Conn());
 	cur_entity_id.clear();
@@ -1422,10 +1428,10 @@ void MIME_Mail::SubmitHeader(MIME_Header* h)
 	{
 	if ( mime_one_header )
 		{
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(BuildHeaderVal(h));
-		analyzer->ConnectionEvent(mime_one_header, vl);
+		analyzer->ConnectionEventFast(mime_one_header, {
+			analyzer->BuildConnVal(),
+			BuildHeaderVal(h),
+		});
 		}
 	}
 
@@ -1433,10 +1439,10 @@ void MIME_Mail::SubmitAllHeaders(MIME_HeaderList& hlist)
 	{
 	if ( mime_all_headers )
 		{
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(BuildHeaderTable(hlist));
-		analyzer->ConnectionEvent(mime_all_headers, vl);
+		analyzer->ConnectionEventFast(mime_all_headers, {
+			analyzer->BuildConnVal(),
+			BuildHeaderTable(hlist),
+		});
 		}
 	}
 
@@ -1452,7 +1458,7 @@ void MIME_Mail::SubmitData(int len, const char* buf)
 	if ( compute_content_hash )
 		{
 		content_hash_length += len;
-		md5_update(&md5_hash, (const u_char*) buf, len);
+		hash_update(md5_hash, (const u_char*) buf, len);
 		}
 
 	if ( mime_entity_data || mime_all_data )
@@ -1470,11 +1476,11 @@ void MIME_Mail::SubmitData(int len, const char* buf)
 		const char* data = (char*) data_buffer->Bytes() + data_start;
 		int data_len = (buf + len) - data;
 
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(data_len, TYPE_COUNT));
-		vl->append(new StringVal(data_len, data));
-		analyzer->ConnectionEvent(mime_segment_data, vl);
+		analyzer->ConnectionEventFast(mime_segment_data, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetCount(data_len),
+			new StringVal(data_len, data),
+		});
 		}
 
 	cur_entity_id = file_mgr->DataIn(reinterpret_cast<const u_char*>(buf), len,
@@ -1517,12 +1523,11 @@ void MIME_Mail::SubmitAllData()
 		BroString* s = concatenate(all_content);
 		delete_strings(all_content);
 
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new Val(s->Len(), TYPE_COUNT));
-		vl->append(new StringVal(s));
-
-		analyzer->ConnectionEvent(mime_all_data, vl);
+		analyzer->ConnectionEventFast(mime_all_data, {
+			analyzer->BuildConnVal(),
+			val_mgr->GetCount(s->Len()),
+			new StringVal(s),
+		});
 		}
 	}
 
@@ -1547,10 +1552,10 @@ void MIME_Mail::SubmitEvent(int event_type, const char* detail)
 
 	if ( mime_event )
 		{
-		val_list* vl = new val_list();
-		vl->append(analyzer->BuildConnVal());
-		vl->append(new StringVal(category));
-		vl->append(new StringVal(detail));
-		analyzer->ConnectionEvent(mime_event, vl);
+		analyzer->ConnectionEventFast(mime_event, {
+			analyzer->BuildConnVal(),
+			new StringVal(category),
+			new StringVal(detail),
+		});
 		}
 	}

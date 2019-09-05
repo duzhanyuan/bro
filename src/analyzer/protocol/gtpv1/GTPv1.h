@@ -7,19 +7,17 @@ namespace analyzer { namespace gtpv1 {
 
 class GTPv1_Analyzer : public analyzer::Analyzer {
 public:
-	GTPv1_Analyzer(Connection* conn);
+	explicit GTPv1_Analyzer(Connection* conn);
 	virtual ~GTPv1_Analyzer();
 
 	virtual void Done();
 	virtual void DeliverPacket(int len, const u_char* data, bool orig,
-					uint64 seq, const IP_Hdr* ip, int caplen);
+					uint64_t seq, const IP_Hdr* ip, int caplen);
 
 	static analyzer::Analyzer* Instantiate(Connection* conn)
 		{ return new GTPv1_Analyzer(conn); }
 
 protected:
-	void ExpireTimer(double t);
-
 	binpac::GTPv1::GTPv1_Conn* interp;
 };
 

@@ -2,12 +2,14 @@
 
 #include <algorithm>
 
-#include "../Event.h"
-#include "../EventHandler.h"
-#include "../NetVar.h"
-#include "../Net.h"
-#include "../Type.h"
+#include "Event.h"
+#include "EventHandler.h"
+#include "NetVar.h"
+#include "Net.h"
+#include "Type.h"
+#include "File.h"
 
+#include "broker/Manager.h"
 #include "threading/Manager.h"
 #include "threading/SerialTypes.h"
 
@@ -15,12 +17,8 @@
 #include "WriterFrontend.h"
 #include "WriterBackend.h"
 #include "logging.bif.h"
-#include "../plugin/Plugin.h"
-#include "../plugin/Manager.h"
-
-#ifdef ENABLE_BROKER
-#include "broker/Manager.h"
-#endif
+#include "plugin/Plugin.h"
+#include "plugin/Manager.h"
 
 using namespace logging;
 
@@ -82,10 +80,7 @@ struct Manager::Stream {
 
 	WriterMap writers;	// Writers indexed by id/path pair.
 
-#ifdef ENABLE_BROKER
 	bool enable_remote;
-	int remote_flags;
-#endif
 
 	~Stream();
 	};
@@ -286,7 +281,7 @@ bool Manager::CreateStream(EnumVal* id, RecordVal* sval)
 		if ( ! same_type((*args)[0], columns) )
 			{
 			reporter->Error("stream event's argument type does not match column record type");
-			return new Val(0, TYPE_BOOL);
+			return val_mgr->GetBool(0);
 			}
 		}
 
@@ -310,10 +305,7 @@ bool Manager::CreateStream(EnumVal* id, RecordVal* sval)
 	streams[idx]->event = event ? event_registry->Lookup(event->Name()) : 0;
 	streams[idx]->columns = columns->Ref()->AsRecordType();
 
-#ifdef ENABLE_BROKER
 	streams[idx]->enable_remote = internal_val("Log::enable_remote_logging")->AsBool();
-	streams[idx]->remote_flags = broker::PEERS;
-#endif
 
 	DBG_LOG(DBG_LOGGING, "Created new logging stream '%s', raising event %s",
 		streams[idx]->name.c_str(), event ? streams[idx]->event->Name() : "<none>");
@@ -724,11 +716,7 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 
 	// Raise the log event.
 	if ( stream->event )
-		{
-		val_list* vl = new val_list(1);
-		vl->append(columns->Ref());
-		mgr.QueueEvent(stream->event, vl, SOURCE_LOCAL);
-		}
+		mgr.QueueEventFast(stream->event, {columns->Ref()}, SOURCE_LOCAL);
 
 	// Send to each of our filters.
 	for ( list<Filter*>::iterator i = stream->filters.begin();
@@ -741,8 +729,7 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 			{
 			// See whether the predicates indicates that we want
 			// to log this record.
-			val_list vl(1);
-			vl.append(columns->Ref());
+			val_list vl{columns->Ref()};
 
 			int result = 1;
 
@@ -759,16 +746,11 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 
 		if ( filter->path_func )
 			{
-			val_list vl(3);
-			vl.append(id->Ref());
-
 			Val* path_arg;
 			if ( filter->path_val )
 				path_arg = filter->path_val->Ref();
 			else
-				path_arg = new StringVal("");
-
-			vl.append(path_arg);
+				path_arg = val_mgr->GetEmptyString();
 
 			Val* rec_arg;
 			BroType* rt = filter->path_func->FType()->Args()->FieldType("rec");
@@ -779,7 +761,11 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 				// Can be TYPE_ANY here.
 				rec_arg = columns->Ref();
 
-			vl.append(rec_arg);
+			val_list vl{
+				id->Ref(),
+				path_arg,
+				rec_arg,
+			};
 
 			Val* v = 0;
 
@@ -884,7 +870,7 @@ bool Manager::Write(EnumVal* id, RecordVal* columns)
 					if ( (val = filter->field_name_map->Lookup(fn, false)) != 0 )
 						{
 						delete [] filter->fields[j]->name;
-						filter->fields[j]->name = val->AsStringVal()->CheckString();
+						filter->fields[j]->name = copy_string(val->AsStringVal()->CheckString());
 						}
 					delete fn;
 					}
@@ -1096,8 +1082,7 @@ threading::Value** Manager::RecordToFilterVals(Stream* stream, Filter* filter,
 	RecordVal* ext_rec = nullptr;
 	if ( filter->num_ext_fields > 0 )
 		{
-		val_list vl(1);
-		vl.append(filter->path_val->Ref());
+		val_list vl{filter->path_val->Ref()};
 		Val* res = filter->ext_func->Call(&vl);
 		if ( res )
 			ext_rec = res->AsRecordVal();
@@ -1241,11 +1226,7 @@ WriterFrontend* Manager::CreateWriter(EnumVal* id, EnumVal* writer, WriterBacken
 	winfo->info->rotation_interval = winfo->interval;
 	winfo->info->rotation_base = parse_rotate_base_time(base_time);
 
-#ifdef ENABLE_BROKER
-	winfo->writer = new WriterFrontend(*winfo->info, id, writer, local, remote, stream->remote_flags);
-#else
-	winfo->writer = new WriterFrontend(*winfo->info, id, writer, local, remote, 0);
-#endif
+	winfo->writer = new WriterFrontend(*winfo->info, id, writer, local, remote);
 	winfo->writer->Init(num_fields, fields);
 
 	if ( ! from_remote )
@@ -1320,56 +1301,32 @@ bool Manager::WriteFromRemote(EnumVal* id, EnumVal* writer, string path, int num
 	return true;
 	}
 
-void Manager::SendAllWritersTo(RemoteSerializer::PeerID peer)
+void Manager::SendAllWritersTo(const broker::endpoint_info& ei)
 	{
+	auto et = internal_type("Log::Writer")->AsEnumType();
+
 	for ( vector<Stream *>::iterator s = streams.begin(); s != streams.end(); ++s )
 		{
 		Stream* stream = (*s);
 
-		if ( ! stream )
+		if ( ! (stream && stream->enable_remote) )
 			continue;
+
 
 		for ( Stream::WriterMap::iterator i = stream->writers.begin();
 		      i != stream->writers.end(); i++ )
 			{
 			WriterFrontend* writer = i->second->writer;
-
-			EnumVal writer_val(i->first.first, internal_type("Log::Writer")->AsEnumType());
-			remote_serializer->SendLogCreateWriter(peer, (*s)->id,
-							       &writer_val,
-							       *i->second->info,
-							       writer->NumFields(),
-							       writer->Fields());
+			auto writer_val = et->GetVal(i->first.first);
+			broker_mgr->PublishLogCreate((*s)->id,
+						     writer_val,
+						     *i->second->info,
+						     writer->NumFields(),
+						     writer->Fields(),
+						     ei);
+			Unref(writer_val);
 			}
 		}
-	}
-
-void Manager::SendAllWritersTo(const string& peer)
-	{
-#ifdef ENABLE_BROKER
-	for ( vector<Stream *>::iterator s = streams.begin(); s != streams.end(); ++s )
-		{
-		Stream* stream = (*s);
-
-		if ( ! stream )
-			continue;
-
-		for ( Stream::WriterMap::iterator i = stream->writers.begin();
-		      i != stream->writers.end(); i++ )
-			{
-			WriterFrontend* writer = i->second->writer;
-
-			EnumVal writer_val(i->first.first, internal_type("Log::Writer")->AsEnumType());
-			broker_mgr->CreateLog((*s)->id,
-					      &writer_val,
-					      *i->second->info,
-					      writer->NumFields(),
-					      writer->Fields(),
-					      stream->remote_flags,
-					      peer);
-			}
-		}
-#endif
 	}
 
 bool Manager::SetBuf(EnumVal* id, bool enabled)
@@ -1418,9 +1375,7 @@ void Manager::Terminate()
 		}
 	}
 
-#ifdef ENABLE_BROKER
-
-bool Manager::EnableRemoteLogs(EnumVal* stream_id, int flags)
+bool Manager::EnableRemoteLogs(EnumVal* stream_id)
 	{
 	auto stream = FindStream(stream_id);
 
@@ -1428,7 +1383,6 @@ bool Manager::EnableRemoteLogs(EnumVal* stream_id, int flags)
 		return false;
 
 	stream->enable_remote = true;
-	stream->remote_flags = flags;
 	return true;
 	}
 
@@ -1462,8 +1416,6 @@ RecordType* Manager::StreamColumns(EnumVal* stream_id)
 
 	return stream->columns;
 	}
-
-#endif
 
 // Timer which on dispatching rotates the filter.
 class RotationTimer : public Timer {
@@ -1596,7 +1548,7 @@ bool Manager::FinishedRotation(WriterFrontend* writer, const char* new_name, con
 	info->Assign(2, new StringVal(winfo->writer->Info().path));
 	info->Assign(3, new Val(open, TYPE_TIME));
 	info->Assign(4, new Val(close, TYPE_TIME));
-	info->Assign(5, new Val(terminating, TYPE_BOOL));
+	info->Assign(5, val_mgr->GetBool(terminating));
 
 	Func* func = winfo->postprocessor;
 	if ( ! func )
@@ -1609,8 +1561,7 @@ bool Manager::FinishedRotation(WriterFrontend* writer, const char* new_name, con
 	assert(func);
 
 	// Call the postprocessor function.
-	val_list vl(1);
-	vl.append(info);
+	val_list vl{info};
 
 	int result = 0;
 

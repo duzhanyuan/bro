@@ -39,12 +39,9 @@ public:
 	 * remote: If true, the writer will forward logs to remote
 	 * clients.
 	 *
-	 * remote_flags: Broker flags controlling where remote logs are
-	 * propagated to.
-	 *
 	 * Frontends must only be instantiated by the main thread.
 	 */
-	WriterFrontend(const WriterBackend::WriterInfo& info, EnumVal* stream, EnumVal* writer, bool local, bool remote, int remote_flags);
+	WriterFrontend(const WriterBackend::WriterInfo& info, EnumVal* stream, EnumVal* writer, bool local, bool remote);
 
 	/**
 	 * Destructor.
@@ -139,19 +136,6 @@ public:
 	void Rotate(const char* rotated_path, double open, double close, bool terminating);
 
 	/**
-	 * Finalizes writing to this tream.
-	 *
-	 * This method generates a message to the backend writer and triggers
-	 * the corresponding message there. If the backend method fails, it
-	 * sends a message back that will asynchronously call Disable().
-	 *
-	 * This method must only be called from the main thread.
-	 *
-	 * @param network_time The network time when the finish was triggered.
-	 */
-	void Finish(double network_time);
-
-	/**
 	 * Explicitly triggers a transfer of all potentially buffered Write()
 	 * operations over to the backend.
 	 *
@@ -215,7 +199,6 @@ protected:
 	bool buf;	// True if buffering is enabled (default).
 	bool local;	// True if logging locally.
 	bool remote;	// True if loggin remotely.
-	int remote_flags;	// Broker propagation flags.
 
 	const char* name;	// Descriptive name of the
 	WriterBackend::WriterInfo* info;	// The writer information.

@@ -1,5 +1,7 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
+#include <broker/data.hh>
+
 #include "util.h"
 #include "threading/SerialTypes.h"
 
@@ -67,66 +69,8 @@ public:
 
 using namespace logging;
 
-bool WriterBackend::WriterInfo::Read(SerializationFormat* fmt)
-	{
-	int size;
-
-	string tmp_path;
-
-	if ( ! (fmt->Read(&tmp_path, "path") &&
-		fmt->Read(&rotation_base, "rotation_base") &&
-		fmt->Read(&rotation_interval, "rotation_interval") &&
-		fmt->Read(&network_time, "network_time") &&
-		fmt->Read(&size, "config_size")) )
-		return false;
-
-	path = copy_string(tmp_path.c_str());
-
-	config.clear();
-
-	while ( size-- )
-		{
-		string value;
-		string key;
-
-		if ( ! (fmt->Read(&value, "config-value") && fmt->Read(&key, "config-key")) )
-			return false;
-
-		config.insert(std::make_pair(copy_string(value.c_str()), copy_string(key.c_str())));
-		}
-
-	return true;
-	}
-
-
-bool WriterBackend::WriterInfo::Write(SerializationFormat* fmt) const
-	{
-	int size = config.size();
-
-	if ( ! (fmt->Write(path, "path") &&
-		fmt->Write(rotation_base, "rotation_base") &&
-		fmt->Write(rotation_interval, "rotation_interval") &&
-		fmt->Write(network_time, "network_time") &&
-		fmt->Write(size, "config_size")) )
-		return false;
-
-	for ( config_map::const_iterator i = config.begin(); i != config.end(); ++i )
-		{
-		if ( ! (fmt->Write(i->first, "config-value") && fmt->Write(i->second, "config-key")) )
-			return false;
-		}
-
-	return true;
-	}
-
-#ifdef ENABLE_BROKER
 broker::data WriterBackend::WriterInfo::ToBroker() const
 	{
-	auto bpath = broker::record::field(path);
-	auto brotation_base = broker::record::field(rotation_base);
-	auto brotation_interval = broker::record::field(rotation_interval);
-	auto bnetwork_time = broker::record::field(network_time);
-
 	auto t = broker::table();
 
 	for ( config_map::const_iterator i = config.begin(); i != config.end(); ++i )
@@ -136,23 +80,20 @@ broker::data WriterBackend::WriterInfo::ToBroker() const
 		t.insert(std::make_pair(key, value));
 		}
 
-	auto bconfig = broker::record::field(move(t));
-
-	return move(broker::record({bpath, brotation_base, brotation_interval, bnetwork_time, bconfig}));
+	return broker::vector({path, rotation_base, rotation_interval, network_time, std::move(t)});
 	}
 
 bool WriterBackend::WriterInfo::FromBroker(broker::data d)
 	{
-	auto r = broker::get<broker::record>(d);
-
-	if ( ! r )
+	if ( ! caf::holds_alternative<broker::vector>(d) )
 		return false;
 
-	auto bpath = broker::get<std::string>(*r->get(0));
-	auto brotation_base = broker::get<double>(*r->get(1));
-	auto brotation_interval = broker::get<double>(*r->get(2));
-	auto bnetwork_time = broker::get<double>(*r->get(3));
-	auto bconfig = broker::get<broker::table>(*r->get(4));
+	auto v = caf::get<broker::vector>(d);
+	auto bpath = caf::get_if<std::string>(&v[0]);
+	auto brotation_base = caf::get_if<double>(&v[1]);
+	auto brotation_interval = caf::get_if<double>(&v[2]);
+	auto bnetwork_time = caf::get_if<double>(&v[3]);
+	auto bconfig = caf::get_if<broker::table>(&v[4]);
 
 	if ( ! (bpath && brotation_base && brotation_interval && bnetwork_time && bconfig) )
 		return false;
@@ -164,8 +105,8 @@ bool WriterBackend::WriterInfo::FromBroker(broker::data d)
 
 	for ( auto i : *bconfig )
 		{
-		auto k = broker::get<std::string>(i.first);
-		auto v = broker::get<std::string>(i.second);
+		auto k = caf::get_if<std::string>(&i.first);
+		auto v = caf::get_if<std::string>(&i.second);
 
 		if ( ! (k && v) )
 			return false;
@@ -176,7 +117,6 @@ bool WriterBackend::WriterInfo::FromBroker(broker::data d)
 
 	return true;
 	}
-#endif
 
 WriterBackend::WriterBackend(WriterFrontend* arg_frontend) : MsgThread()
 	{
@@ -239,7 +179,7 @@ void WriterBackend::DisableFrontend()
 
 bool WriterBackend::Init(int arg_num_fields, const Field* const* arg_fields)
 	{
-	SetOSName(Fmt("bro: %s", Name()));
+	SetOSName(Fmt("zk.%s", Name()));
 	num_fields = arg_num_fields;
 	fields = arg_fields;
 

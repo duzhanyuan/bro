@@ -1,6 +1,6 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include "bro-config.h"
+#include "zeek-config.h"
 
 #include <fstream>
 #include <sstream>
@@ -71,7 +71,7 @@ bool SQLite::DoInit(const ReaderInfo& info, int arg_num_fields, const threading:
 	{
 	if ( sqlite3_threadsafe() == 0 )
 		{
-		Error("SQLite reports that it is not threadsafe. Bro needs a threadsafe version of SQLite. Aborting");
+		Error("SQLite reports that it is not threadsafe. Zeek needs a threadsafe version of SQLite. Aborting");
 		return false;
 		}
 
@@ -128,7 +128,7 @@ bool SQLite::DoInit(const ReaderInfo& info, int arg_num_fields, const threading:
 Value* SQLite::EntryToVal(sqlite3_stmt *st, const threading::Field *field, int pos, int subpos)
 	{
 	if ( sqlite3_column_type(st, pos ) == SQLITE_NULL )
-		return new Value(field->type, false);
+		return new Value(field->type, field->subtype, false);
 
 	Value* val = new Value(field->type, true);
 

@@ -6,7 +6,6 @@
 #include <string>
 
 #include <string>
-#include "SerialObj.h"
 #include "PriorityQueue.h"
 
 extern "C" {
@@ -23,12 +22,12 @@ enum TimerType {
 	TIMER_CONN_STATUS_UPDATE,
 	TIMER_DNS_EXPIRE,
 	TIMER_FILE_ANALYSIS_INACTIVITY,
+	TIMER_FLOW_WEIRD_EXPIRE,
 	TIMER_FRAG,
-	TIMER_INCREMENTAL_SEND,
-	TIMER_INCREMENTAL_WRITE,
 	TIMER_INTERCONN,
 	TIMER_IP_TUNNEL_INACTIVITY,
 	TIMER_NB_EXPIRE,
+	TIMER_NET_WEIRD_EXPIRE,
 	TIMER_NETWORK,
 	TIMER_NTP_EXPIRE,
 	TIMER_PROFILE,
@@ -49,14 +48,13 @@ const int NUM_TIMER_TYPES = int(TIMER_TIMERMGR_EXPIRE) + 1;
 
 extern const char* timer_type_to_string(TimerType type);
 
-class Serializer;
 class ODesc;
 
-class Timer : public SerialObj, public PQ_Element {
+class Timer : public PQ_Element {
 public:
 	Timer(double t, TimerType arg_type) : PQ_Element(t)
 		{ type = (char) arg_type; }
-	virtual ~Timer()	{ }
+	~Timer() override { }
 
 	TimerType Type() const	{ return (TimerType) type; }
 
@@ -67,13 +65,8 @@ public:
 
 	void Describe(ODesc* d) const;
 
-	bool Serialize(SerialInfo* info) const;
-	static Timer* Unserialize(UnserialInfo* info);
-
 protected:
 	Timer()	{}
-
-	DECLARE_ABSTRACT_SERIAL(Timer);
 
 	unsigned int type:8;
 };
@@ -109,7 +102,7 @@ public:
 
 	virtual int Size() const = 0;
 	virtual int PeakSize() const = 0;
-	virtual uint64 CumulativeNum() const = 0;
+	virtual uint64_t CumulativeNum() const = 0;
 
 	double LastTimestamp() const	{ return last_timestamp; }
 	// Returns time of last advance in global network time.
@@ -118,7 +111,7 @@ public:
 	static unsigned int* CurrentTimers()	{ return current_timers; }
 
 protected:
- 	TimerMgr(const Tag& arg_tag)
+	explicit TimerMgr(const Tag& arg_tag)
  		{
  		t = 0.0;
  		num_expired = 0;
@@ -141,20 +134,19 @@ protected:
 
 class PQ_TimerMgr : public TimerMgr {
 public:
-	PQ_TimerMgr(const Tag& arg_tag);
-	~PQ_TimerMgr();
+	explicit PQ_TimerMgr(const Tag& arg_tag);
+	~PQ_TimerMgr() override;
 
-	void Add(Timer* timer);
-	void Expire();
+	void Add(Timer* timer) override;
+	void Expire() override;
 
-	int Size() const	{ return q->Size(); }
-	int PeakSize() const	{ return q->PeakSize(); }
-	uint64 CumulativeNum() const	{ return q->CumulativeNum(); }
-	unsigned int MemoryUsage() const;
+	int Size() const override { return q->Size(); }
+	int PeakSize() const override { return q->PeakSize(); }
+	uint64_t CumulativeNum() const override { return q->CumulativeNum(); }
 
 protected:
-	int DoAdvance(double t, int max_expire);
-	void Remove(Timer* timer);
+	int DoAdvance(double t, int max_expire) override;
+	void Remove(Timer* timer) override;
 
 	Timer* Remove()			{ return (Timer*) q->Remove(); }
 	Timer* Top()			{ return (Timer*) q->Top(); }
@@ -164,20 +156,20 @@ protected:
 
 class CQ_TimerMgr : public TimerMgr {
 public:
-	CQ_TimerMgr(const Tag& arg_tag);
-	~CQ_TimerMgr();
+	explicit CQ_TimerMgr(const Tag& arg_tag);
+	~CQ_TimerMgr() override;
 
-	void Add(Timer* timer);
-	void Expire();
+	void Add(Timer* timer) override;
+	void Expire() override;
 
-	int Size() const	{ return cq_size(cq); }
-	int PeakSize() const	{ return cq_max_size(cq); }
-	uint64 CumulativeNum() const	{ return cq_cumulative_num(cq); }
+	int Size() const override { return cq_size(cq); }
+	int PeakSize() const override { return cq_max_size(cq); }
+	uint64_t CumulativeNum() const override { return cq_cumulative_num(cq); }
 	unsigned int MemoryUsage() const;
 
 protected:
-	int DoAdvance(double t, int max_expire);
-	void Remove(Timer* timer);
+	int DoAdvance(double t, int max_expire) override;
+	void Remove(Timer* timer) override;
 
 	struct cq_handle *cq;
 };

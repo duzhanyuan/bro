@@ -36,7 +36,7 @@ VectorVal* proc_padata(const KRB_PA_Data_Sequence* data, const BroAnalyzer bro_a
 			case PA_PW_SALT:
 				{
 				RecordVal * type_val = new RecordVal(BifType::Record::KRB::Type_Value);
-				type_val->Assign(0, new Val(element->data_type(), TYPE_COUNT));
+				type_val->Assign(0, val_mgr->GetCount(element->data_type()));
 				type_val->Assign(1, bytestring_to_val(element->pa_data_element()->pa_pw_salt()->encoding()->content()));
 				vv->Assign(vv->Size(), type_val);
 				break;
@@ -44,7 +44,7 @@ VectorVal* proc_padata(const KRB_PA_Data_Sequence* data, const BroAnalyzer bro_a
 			case PA_ENCTYPE_INFO:
 				{
 				RecordVal * type_val = new RecordVal(BifType::Record::KRB::Type_Value);
-				type_val->Assign(0, new Val(element->data_type(), TYPE_COUNT));
+				type_val->Assign(0, val_mgr->GetCount(element->data_type()));
 				type_val->Assign(1, bytestring_to_val(element->pa_data_element()->pf_enctype_info()->salt()));
 				vv->Assign(vv->Size(), type_val);
 				break;
@@ -52,7 +52,7 @@ VectorVal* proc_padata(const KRB_PA_Data_Sequence* data, const BroAnalyzer bro_a
 			case PA_ENCTYPE_INFO2:
 				{
 				RecordVal * type_val = new RecordVal(BifType::Record::KRB::Type_Value);
-				type_val->Assign(0, new Val(element->data_type(), TYPE_COUNT));
+				type_val->Assign(0, val_mgr->GetCount(element->data_type()));
 				type_val->Assign(1, bytestring_to_val(element->pa_data_element()->pf_enctype_info2()->salt()));
 				vv->Assign(vv->Size(), type_val);
 				break;
@@ -75,8 +75,8 @@ VectorVal* proc_padata(const KRB_PA_Data_Sequence* data, const BroAnalyzer bro_a
 				string file_id = file_mgr->HashHandle(file_handle.Description());
 
 				file_mgr->DataIn(reinterpret_cast<const u_char*>(cert.data()),
-			                 	 cert.length(), bro_analyzer->GetAnalyzerTag(),
-			                 	 bro_analyzer->Conn(), true, file_id);
+				                 cert.length(), bro_analyzer->GetAnalyzerTag(),
+				                 bro_analyzer->Conn(), true, file_id, "application/x-x509-user-cert");
 				file_mgr->EndOfFile(file_id);
 
 				break;
@@ -99,8 +99,8 @@ VectorVal* proc_padata(const KRB_PA_Data_Sequence* data, const BroAnalyzer bro_a
 				string file_id = file_mgr->HashHandle(file_handle.Description());
 
 				file_mgr->DataIn(reinterpret_cast<const u_char*>(cert.data()),
-	                 			 cert.length(), bro_analyzer->GetAnalyzerTag(),
-			 	                 bro_analyzer->Conn(), false, file_id);
+				                 cert.length(), bro_analyzer->GetAnalyzerTag(),
+				                 bro_analyzer->Conn(), false, file_id, "application/x-x509-user-cert");
 				file_mgr->EndOfFile(file_id);
 
 				break;
@@ -110,7 +110,7 @@ VectorVal* proc_padata(const KRB_PA_Data_Sequence* data, const BroAnalyzer bro_a
 				if ( ! is_error && element->pa_data_element()->unknown()->meta()->length() > 0 )
 					{
 					RecordVal * type_val = new RecordVal(BifType::Record::KRB::Type_Value);
-					type_val->Assign(0, new Val(element->data_type(), TYPE_COUNT));
+					type_val->Assign(0, val_mgr->GetCount(element->data_type()));
 					type_val->Assign(1, bytestring_to_val(element->pa_data_element()->unknown()->content()));
 					vv->Assign(vv->Size(), type_val);
 					}
